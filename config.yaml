@@ -1,0 +1,37 @@
+nexla:
+  service_key: "${NEXLA_SERVICE_KEY}"
+  api_url: "${NEXLA_API_URL}"
+
+monitoring:
+  poll_interval_seconds: 300
+  notification_lookback_hours: 24
+  suppression_window_hours: 2
+  state_db_path: "data/state.db"
+
+# Silent Failure detection: a flow that processed far fewer records than the same
+# window yesterday, while still looking healthy. Compared day-over-day from Nexla
+# org-health volume; see docs/adr/0005-silent-failure-volume-detection.md.
+detection:
+  volume_threshold_pct: 40        # alert when volume drops >= 40% vs the same window yesterday
+  min_baseline_records: 100       # ignore flows whose baseline is below this (too small/variable)
+  flows: []                       # per-flow overrides for flows with high natural variance
+#  flows:
+#    - flow_id: 789
+#      volume_threshold_pct: 60
+
+# Flows that should never trigger an Alert (e.g. high natural variance, known-noisy).
+blocklist: []
+#  - flow_id: 456
+#    reason: "High natural variance — not actionable"
+
+# Slack alert delivery is disabled by default. Enable only with a bot token and
+# channel ID (for example via env vars in .env); otherwise alerts print to console.
+slack:
+  enabled: true
+  bot_token: "${SLACK_BOT_TOKEN}"
+  channel_id: "${SLACK_CHANNEL_ID}"
+#  api_url: "https://slack.com/api/chat.postMessage"
+
+opencode:
+  model: "big-pickle"
+  base_url: "https://opencode.ai/zen/v1"

@@ -1,0 +1,16 @@
+services:
+  pipeline-monitor:
+    build: .
+    environment:
+      NEXLA_SERVICE_KEY: ${NEXLA_SERVICE_KEY:-}
+      NEXLA_API_URL: ${NEXLA_API_URL:-https://qa.nexla.com/nexla-api}
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      # Persist the SQLite Suppression Window across container restarts; if this
+      # volume is lost the window resets and repeat alerts may briefly fire again.
+      - pipeline-monitor-state:/app/data
+    command: ["pipeline-monitor", "--config", "/app/config.yaml"]
+
+volumes:
+  pipeline-monitor-state:

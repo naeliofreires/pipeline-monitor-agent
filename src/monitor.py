@@ -21,6 +21,7 @@ from modules.detection.silent_failure import (
 )
 from modules.enrichment.enricher import enrich_anomaly
 from modules.suppression.suppression import note_alerted, should_alert
+from modules.controls.policy import ControlMetadata
 from repositories.snapshot_repository import SnapshotRepository
 from repositories.suppression_repository import SuppressionRepository
 
@@ -90,7 +91,7 @@ def _scan_silent_failures(
     config: dict[str, Any],
     now: datetime,
     exclude_flow_ids: set[int],
-) -> tuple[list, dict[int, tuple[str | None, int]], str]:
+) -> tuple[list, dict[int, tuple[str | None, int, str | None]], str]:
     """Read today's vs yesterday's per-flow volume and flag big drops (no writes).
 
     Returns ``(anomalies, today_volumes, today)``. Pure reads only — persisting
@@ -154,17 +155,26 @@ def monitor_once(config: dict[str, Any], alert_sender: AlertSender | None = None
             silent_anomalies, today_volumes, today = [], {}, now.date().isoformat()
         anomalies = notification_anomalies + health_anomalies + silent_anomalies
 
+        notification_ids_to_mark_read: set[int] = set()
+
         # Drop blocklisted and still-suppressed anomalies before spending any read/LLM call.
         # Each anomaly is isolated so one failure (e.g. a transient DB lock) does not abort the
         # whole batch or skip the notification read-marking below.
         for anomaly in anomalies:
             try:
                 if not should_alert(anomaly, suppression, now, blocklist):
+                    if anomaly.type == "explicit_failure" and anomaly.notification_id:
+                        notification_ids_to_mark_read.add(anomaly.notification_id)
                     continue
                 evidence = enrich_anomaly(anomaly, adapter)
                 classification = classify_anomaly(anomaly, evidence, llm_adapter)
-                sender.send(build_anomaly_alert_text(anomaly, evidence, classification))
+                try:
+                    sender.send(build_anomaly_alert_text(anomaly, evidence, classification), ControlMetadata(anomaly.flow_id, anomaly.flow_name))
+                except TypeError:
+                    sender.send(build_anomaly_alert_text(anomaly, evidence, classification))
                 note_alerted(anomaly, suppression, now, window_hours)
+                if anomaly.type == "explicit_failure" and anomaly.notification_id:
+                    notification_ids_to_mark_read.add(anomaly.notification_id)
             except Exception:
                 logger.warning(
                     "Failed to process anomaly for flow %s (%s); continuing",
@@ -173,13 +183,14 @@ def monitor_once(config: dict[str, Any], alert_sender: AlertSender | None = None
                     exc_info=True,
                 )
 
-        # Every processed notification is marked read, even if suppressed/blocklisted, so it is
-        # not re-fetched next tick; the SQLite window covers the notification-less health sweep.
-        adapter.mark_notifications_read([a.notification_id for a in notification_anomalies])
+        # Explicit Failure notifications are marked read only after intentional processing:
+        # successful Alert send or deliberate suppression/blocklist. Processing failures are left
+        # unread so the notification can be retried next tick.
+        adapter.mark_notifications_read([a.notification_id for a in notification_anomalies if a.notification_id in notification_ids_to_mark_read])
 
         # Persist today's volumes (state write, kept separate from the read-only scan above) so the
         # comparison survives an API gap and seeds future baselines.
-        for flow_id, (_name, count) in today_volumes.items():
+        for flow_id, (_name, count, _status) in today_volumes.items():
             snapshots.save_snapshot(flow_id, today, count, now)
 
         # Housekeeping: drop state past its retention horizon so the SQLite file stays small.

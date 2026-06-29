@@ -21,6 +21,42 @@ class VolumeObservation:
     flow_name: str | None
     current_volume: int
     baseline_volume: int | None
+    status: str | None = None
+
+
+RUNNING_STATUS_VALUES = {
+    "ACTIVE",
+    "GREEN",
+    "HEALTHY",
+    "OK",
+    "RUNNING",
+    "STARTED",
+    "SUCCESS",
+    "SUCCEEDED",
+}
+
+
+def _flow_status(row: Any) -> str | None:
+    value = get_value(
+        row,
+        "healthStatus",
+        get_value(
+            row,
+            "health_status",
+            get_value(row, "status", get_value(row, "state", get_value(row, "flow_status"))),
+        ),
+    )
+    return str(value).strip().upper() if value is not None and str(value).strip() else None
+
+
+def _is_running_status(status: str | None) -> bool:
+    """Return True only for rows that explicitly look healthy/running.
+
+    Silent Failure means the flow appears healthy/running but moved far fewer records.
+    If the org-health/current-volume row lacks a reliable health/status field, we skip
+    it conservatively to avoid alerting on already RED/failed/paused/stopped flows.
+    """
+    return status is not None and status.strip().upper() in RUNNING_STATUS_VALUES
 
 
 def _record_count(row: Any) -> int | None:
@@ -32,13 +68,13 @@ def _record_count(row: Any) -> int | None:
     return optional_int(value)
 
 
-def extract_flow_volumes(rows: Iterable[Any] | None) -> dict[int, tuple[str | None, int]]:
-    """Parse adapter org-health rows into ``{flow_id: (flow_name, record_count)}``.
+def extract_flow_volumes(rows: Iterable[Any] | None) -> dict[int, tuple[str | None, int, str | None]]:
+    """Parse adapter org-health rows into ``{flow_id: (flow_name, record_count, status)}``.
 
     Rows without a resolvable flow id are skipped; a missing/null record count is
     treated as 0 (the flow is present in the window but moved no data).
     """
-    volumes: dict[int, tuple[str | None, int]] = {}
+    volumes: dict[int, tuple[str | None, int, str | None]] = {}
     for row in rows or []:
         flow_id = optional_int(
             get_value(row, "flow_id", get_value(row, "origin_node_id", get_value(row, "id")))
@@ -47,13 +83,13 @@ def extract_flow_volumes(rows: Iterable[Any] | None) -> dict[int, tuple[str | No
             continue
         name = get_value(row, "flow_name", get_value(row, "name"))
         count = _record_count(row)
-        volumes[flow_id] = (name, count if count is not None else 0)
+        volumes[flow_id] = (name, count if count is not None else 0, _flow_status(row))
     return volumes
 
 
 def build_observations(
-    current: dict[int, tuple[str | None, int]],
-    baseline: dict[int, tuple[str | None, int]],
+    current: dict[int, tuple[str | None, int, str | None]],
+    baseline: dict[int, tuple[str | None, int, str | None]],
     baseline_fallback: Callable[[int], int | None] | None = None,
 ) -> list[VolumeObservation]:
     """Pair each flow's current volume with its baseline (same window yesterday).
@@ -63,11 +99,11 @@ def build_observations(
     consulted so a missing yesterday window does not blind the comparison.
     """
     observations: list[VolumeObservation] = []
-    for flow_id, (name, count) in current.items():
-        baseline_volume = baseline.get(flow_id, (None, None))[1]
+    for flow_id, (name, count, status) in current.items():
+        baseline_volume = baseline.get(flow_id, (None, None, None))[1]
         if baseline_volume is None and baseline_fallback is not None:
             baseline_volume = baseline_fallback(flow_id)
-        observations.append(VolumeObservation(flow_id, name, count, baseline_volume))
+        observations.append(VolumeObservation(flow_id, name, count, baseline_volume, status))
     return observations
 
 
@@ -92,6 +128,8 @@ def detect_silent_failures(
 
     for obs in observations:
         if obs.flow_id in excluded:
+            continue
+        if not _is_running_status(obs.status):
             continue
         baseline = obs.baseline_volume
         # baseline <= 0 also guards the division below when min_baseline is configured to 0.

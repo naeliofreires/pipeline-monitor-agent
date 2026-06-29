@@ -4,9 +4,16 @@ import logging
 from collections.abc import Sized
 from typing import Any
 
-from nexla_sdk import NexlaClient
+try:
+    from nexla_sdk import NexlaClient
+except ModuleNotFoundError:  # pragma: no cover - lets unit tests patch/use __new__ without SDK installed
+    NexlaClient = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+
+def _log_sdk_response(operation: str, flow_id: int, response: Any) -> None:
+    logger.info("Nexla SDK %s response for flow %s: %s", operation, flow_id, response)
 
 
 def _plain(value: Any) -> Any:
@@ -66,6 +73,8 @@ def _first_list(value: Any, *keys: str) -> list[Any]:
 
 class NexlaAdapter:
     def __init__(self, service_key: str, api_url: str | None = None) -> None:
+        if NexlaClient is None:
+            raise RuntimeError("nexla_sdk is required to create NexlaAdapter")
         if api_url:
             self._client = NexlaClient(service_key=service_key, base_url=api_url)
         else:
@@ -75,6 +84,21 @@ class NexlaAdapter:
         """Run a safe read-only auth probe using flows.list."""
         flows: Any = self._client.flows.list()
         return len(flows) if isinstance(flows, Sized) else 0
+
+    def get_flow(self, flow_id: int) -> dict[str, Any] | None:
+        value = _plain(self._client.flows.get(int(flow_id), flows_only=False))
+        _log_sdk_response("flows.get", int(flow_id), value)
+        return value if isinstance(value, dict) else None
+
+    def pause_flow(self, flow_id: int) -> Any:
+        value = _plain(self._client.flows.pause(int(flow_id), all=False))
+        _log_sdk_response("flows.pause", int(flow_id), value)
+        return value
+
+    def activate_flow(self, flow_id: int) -> Any:
+        value = _plain(self._client.flows.activate(int(flow_id), all=False))
+        _log_sdk_response("flows.activate", int(flow_id), value)
+        return value
 
     def list_unread_notifications(self, from_timestamp: int | None = None) -> list[Any]:
         """Fetch unread Nexla notifications, optionally bounded by a unix timestamp."""

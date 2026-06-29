@@ -8,15 +8,35 @@ import time
 from pathlib import Path
 from typing import Any
 
-import yaml
-from apscheduler.schedulers.background import BackgroundScheduler
-from dotenv import load_dotenv
+try:
+    import yaml
+except ModuleNotFoundError:  # minimal fallback for tests/dev without PyYAML
+    yaml = None  # type: ignore[assignment]
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+except ModuleNotFoundError:
+    BackgroundScheduler = None  # type: ignore[assignment]
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    def load_dotenv(path: Path) -> None:
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if "=" in line and not line.strip().startswith("#"):
+                    k, v = line.split("=", 1); os.environ.setdefault(k, v)
 
 from config import require_str
 from modules.alerting.sender import build_alert_sender
+from modules.controls.config import ControlConfigError, controls_enabled, validate_control_config
+from modules.controls.executor import ControlExecutor
+from modules.controls.server import start_interaction_server
 from monitor import build_nexla_adapter, monitor_once
+from repositories.control_audit_repository import ControlAuditRepository
 
 logger = logging.getLogger(__name__)
+
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
 class ConfigError(RuntimeError):
@@ -40,10 +60,26 @@ def load_config(path: str) -> dict[str, Any]:
     config_path = Path(path)
     load_dotenv(config_path.parent / ".env")
     with config_path.open("r", encoding="utf-8") as config_file:
-        loaded = yaml.safe_load(config_file) or {}
+        if yaml is not None:
+            loaded = yaml.safe_load(config_file) or {}
+        else:
+            loaded = _simple_yaml_load(config_file.read())
     if not isinstance(loaded, dict):
         raise ConfigError("config.yaml must contain a YAML mapping")
     return _expand_env(loaded)
+
+
+def _simple_yaml_load(text: str) -> dict[str, Any]:
+    root: dict[str, Any] = {}; current = root
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" ") and line.rstrip().endswith(":"):
+            key = line.strip()[:-1]; root[key] = {}; current = root[key]
+        elif ":" in line:
+            key, value = line.strip().split(":", 1); value = value.strip().strip('"')
+            current[key] = value
+    return root
 
 
 def require_secret(config: dict[str, Any], path: tuple[str, ...], label: str) -> str:
@@ -72,11 +108,34 @@ def run_slack_smoke(config: dict[str, Any]) -> None:
     print("Slack smoke test passed; message sent to configured channel")
 
 
+def dispatch_monitor_once(config: dict[str, Any]) -> None:
+    print("Starting pipeline monitor sync")
+    try:
+        monitor_once(config)
+    except Exception:
+        print("Pipeline monitor sync failed; waiting for the next scheduled sync")
+        raise
+    print("Pipeline monitor sync finished; waiting for the next scheduled sync")
+
+
 def run_scheduler(config: dict[str, Any]) -> None:
+    validate_control_config(config)
+    control_server = None
+    audit = None
+    if controls_enabled(config):
+        audit = ControlAuditRepository(str(config.get("monitoring", {}).get("state_db_path", "data/state.db")))
+        control_service_key = str(config.get("nexla", {}).get("control_service_key") or "").strip()
+        if not control_service_key:
+            control_service_key = require_secret(config, ("nexla", "service_key"), "Nexla service key for temporary flow controls")
+        adapter = build_nexla_adapter(config, control_service_key)
+        control_server = start_interaction_server(config, audit, ControlExecutor(adapter, audit))
+        print("Slack flow control interaction server started")
     interval = int(config.get("monitoring", {}).get("poll_interval_seconds", 300))
+    if BackgroundScheduler is None:
+        raise ConfigError("APScheduler is required to run the scheduler")
     scheduler = BackgroundScheduler()
     scheduler.add_job(
-        lambda: monitor_once(config),
+        lambda: dispatch_monitor_once(config),
         "interval",
         seconds=interval,
         id="monitor_once",
@@ -87,13 +146,17 @@ def run_scheduler(config: dict[str, Any]) -> None:
     print(f"Pipeline monitor scheduler started with {interval}s interval")
     # A transient failure on the first tick must not crash the process; the interval retries.
     try:
-        monitor_once(config)
+        dispatch_monitor_once(config)
     except Exception:
         logger.warning("First monitoring tick failed; the scheduler will retry", exc_info=True)
     try:
         while True:
             time.sleep(60)
     except (KeyboardInterrupt, SystemExit):
+        if control_server:
+            control_server.shutdown()
+        if audit:
+            audit.close()
         scheduler.shutdown()
 
 
@@ -114,7 +177,7 @@ def main() -> None:
             run_slack_smoke(config)
         else:
             run_scheduler(config)
-    except ConfigError as exc:
+    except (ConfigError, ControlConfigError) as exc:
         raise SystemExit(str(exc)) from exc
 
 

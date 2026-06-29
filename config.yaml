@@ -1,5 +1,6 @@
 nexla:
   service_key: "${NEXLA_SERVICE_KEY}"
+  control_service_key: "${NEXLA_CONTROL_SERVICE_KEY}"
   api_url: "${NEXLA_API_URL}"
 
 monitoring:
@@ -30,7 +31,22 @@ slack:
   enabled: true
   bot_token: "${SLACK_BOT_TOKEN}"
   channel_id: "${SLACK_CHANNEL_ID}"
+  signing_secret: "${SLACK_SIGNING_SECRET}"
+  allowed_user_ids: ["U05GCJFSGLU"]
+  allowed_team_ids: []
+  allowed_channel_ids: []
 #  api_url: "https://slack.com/api/chat.postMessage"
+#  flow_url_template: "${SLACK_FLOW_URL_TEMPLATE}"  # e.g. "https://dataops.nexla.io/flows/{flow_id}"
+
+controls:
+  enabled: true
+  require_confirmation: true
+  allowed_actions: ["pause","activate"]
+  protected_flows: []
+  action_ttl_seconds: 900
+  interactions_host: "127.0.0.1"
+  interactions_port: 8080
+  interactions_path: "/slack/interactions"
 
 opencode:
   model: "big-pickle"

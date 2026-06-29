@@ -1,0 +1,8 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Flow Health Digest icon">
+  <rect x="24" y="24" width="464" height="464" rx="116" fill="#0F172A"/>
+  <rect x="24" y="24" width="464" height="464" rx="116" stroke="#1E293B" stroke-width="8"/>
+
+  <path d="M144 262C188 262 206 214 248 214C290 214 302 286 352 286" stroke="#5EEAD4" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="354" cy="286" r="24" fill="#34D399"/>
+  <path d="M343 286L351 294L366 276" stroke="#082F2A" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

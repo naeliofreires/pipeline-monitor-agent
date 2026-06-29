@@ -48,13 +48,13 @@ class SnapshotRepositoryTests(unittest.TestCase):
 class ExtractVolumesTests(unittest.TestCase):
     def test_parses_org_health_rows_and_defaults_null_count_to_zero(self):
         rows = [
-            {"origin_node_id": 55, "name": "Orders", "latestRecordCount": 950},
-            {"origin_node_id": 56, "name": "Empty", "latestRecordCount": None},
+            {"origin_node_id": 55, "name": "Orders", "latestRecordCount": 950, "healthStatus": "GREEN"},
+            {"origin_node_id": 56, "name": "Empty", "latestRecordCount": None, "status": "RUNNING"},
             {"name": "no flow id"},
         ]
         volumes = extract_flow_volumes(rows)
-        self.assertEqual(volumes[55], ("Orders", 950))
-        self.assertEqual(volumes[56], ("Empty", 0))
+        self.assertEqual(volumes[55], ("Orders", 950, "GREEN"))
+        self.assertEqual(volumes[56], ("Empty", 0, "RUNNING"))
         self.assertNotIn(None, volumes)
         self.assertEqual(len(volumes), 2)
 
@@ -62,7 +62,7 @@ class ExtractVolumesTests(unittest.TestCase):
 class DetectSilentFailureTests(unittest.TestCase):
     def test_flags_drop_at_or_above_threshold(self):
         anomalies = detect_silent_failures(
-            [VolumeObservation(55, "Orders", 50, 1000)], threshold_pct=40, min_baseline=100
+            [VolumeObservation(55, "Orders", 50, 1000, "GREEN")], threshold_pct=40, min_baseline=100
         )
         self.assertEqual(len(anomalies), 1)
         self.assertEqual(anomalies[0].type, "silent_failure")
@@ -71,18 +71,18 @@ class DetectSilentFailureTests(unittest.TestCase):
 
     def test_ignores_drop_below_threshold(self):
         anomalies = detect_silent_failures(
-            [VolumeObservation(55, "Orders", 800, 1000)], threshold_pct=40, min_baseline=100
+            [VolumeObservation(55, "Orders", 800, 1000, "GREEN")], threshold_pct=40, min_baseline=100
         )
         self.assertEqual(anomalies, [])
 
     def test_ignores_missing_or_small_baseline(self):
-        no_baseline = detect_silent_failures([VolumeObservation(55, "X", 0, None)], min_baseline=100)
-        tiny_baseline = detect_silent_failures([VolumeObservation(55, "X", 0, 10)], min_baseline=100)
+        no_baseline = detect_silent_failures([VolumeObservation(55, "X", 0, None, "GREEN")], min_baseline=100)
+        tiny_baseline = detect_silent_failures([VolumeObservation(55, "X", 0, 10, "GREEN")], min_baseline=100)
         self.assertEqual(no_baseline, [])
         self.assertEqual(tiny_baseline, [])
 
     def test_per_flow_threshold_overrides_global(self):
-        obs = [VolumeObservation(789, "Spiky", 500, 1000)]  # 50% drop
+        obs = [VolumeObservation(789, "Spiky", 500, 1000, "GREEN")]  # 50% drop
         self.assertEqual(detect_silent_failures(obs, threshold_pct=40, min_baseline=100)[0].flow_id, 789)
         self.assertEqual(
             detect_silent_failures(obs, threshold_pct=40, min_baseline=100, per_flow_threshold={789: 60}),
@@ -91,7 +91,7 @@ class DetectSilentFailureTests(unittest.TestCase):
 
     def test_excludes_already_reported_flows(self):
         anomalies = detect_silent_failures(
-            [VolumeObservation(55, "Orders", 0, 1000)],
+            [VolumeObservation(55, "Orders", 0, 1000, "GREEN")],
             threshold_pct=40,
             min_baseline=100,
             exclude_flow_ids={55},
@@ -100,26 +100,26 @@ class DetectSilentFailureTests(unittest.TestCase):
 
     def test_threshold_boundary_is_inclusive(self):
         fires = detect_silent_failures(
-            [VolumeObservation(55, "X", 600, 1000)], threshold_pct=40, min_baseline=100
+            [VolumeObservation(55, "X", 600, 1000, "GREEN")], threshold_pct=40, min_baseline=100
         )  # exactly 40% drop
         just_under = detect_silent_failures(
-            [VolumeObservation(55, "X", 601, 1000)], threshold_pct=40, min_baseline=100
+            [VolumeObservation(55, "X", 601, 1000, "GREEN")], threshold_pct=40, min_baseline=100
         )  # 39.9%
         self.assertEqual(len(fires), 1)
         self.assertEqual(just_under, [])
 
     def test_min_baseline_boundary_is_inclusive(self):
         at = detect_silent_failures(
-            [VolumeObservation(55, "X", 0, 100)], threshold_pct=40, min_baseline=100
+            [VolumeObservation(55, "X", 0, 100, "GREEN")], threshold_pct=40, min_baseline=100
         )
         below = detect_silent_failures(
-            [VolumeObservation(55, "X", 0, 99)], threshold_pct=40, min_baseline=100
+            [VolumeObservation(55, "X", 0, 99, "GREEN")], threshold_pct=40, min_baseline=100
         )
         self.assertEqual(len(at), 1)
         self.assertEqual(below, [])
 
     def test_per_flow_threshold_can_tighten_to_create_alert(self):
-        obs = [VolumeObservation(789, "Spiky", 700, 1000)]  # 30% drop, below the global 40%
+        obs = [VolumeObservation(789, "Spiky", 700, 1000, "GREEN")]  # 30% drop, below the global 40%
         self.assertEqual(detect_silent_failures(obs, threshold_pct=40, min_baseline=100), [])
         tightened = detect_silent_failures(
             obs, threshold_pct=40, min_baseline=100, per_flow_threshold={789: 25}
@@ -128,16 +128,16 @@ class DetectSilentFailureTests(unittest.TestCase):
 
     def test_volume_increase_is_not_flagged(self):
         anomalies = detect_silent_failures(
-            [VolumeObservation(55, "Growing", 2000, 1000)], threshold_pct=40, min_baseline=100
+            [VolumeObservation(55, "Growing", 2000, 1000, "GREEN")], threshold_pct=40, min_baseline=100
         )
         self.assertEqual(anomalies, [])
 
     def test_mixed_flows_returns_only_qualifying(self):
         obs = [
-            VolumeObservation(1, "collapsed", 10, 1000),  # 99% -> fires
-            VolumeObservation(2, "steady", 950, 1000),    # 5% -> no
-            VolumeObservation(3, "tiny", 0, 10),          # baseline below min -> no
-            VolumeObservation(4, "already-reported", 0, 1000),  # excluded
+            VolumeObservation(1, "collapsed", 10, 1000, "GREEN"),  # 99% -> fires
+            VolumeObservation(2, "steady", 950, 1000, "GREEN"),    # 5% -> no
+            VolumeObservation(3, "tiny", 0, 10, "GREEN"),          # baseline below min -> no
+            VolumeObservation(4, "already-reported", 0, 1000, "GREEN"),  # excluded
         ]
         out = detect_silent_failures(obs, threshold_pct=40, min_baseline=100, exclude_flow_ids={4})
         self.assertEqual([a.flow_id for a in out], [1])
@@ -145,9 +145,29 @@ class DetectSilentFailureTests(unittest.TestCase):
     def test_min_baseline_zero_does_not_divide_by_zero(self):
         # An operator setting min_baseline 0 must not crash on a baseline of 0.
         anomalies = detect_silent_failures(
-            [VolumeObservation(55, "X", 0, 0)], threshold_pct=40, min_baseline=0
+            [VolumeObservation(55, "X", 0, 0, "GREEN")], threshold_pct=40, min_baseline=0
         )
         self.assertEqual(anomalies, [])
+
+    def test_requires_explicit_running_or_healthy_status(self):
+        obs = [
+            VolumeObservation(1, "healthy", 0, 1000, "GREEN"),
+            VolumeObservation(2, "running", 0, 1000, "RUNNING"),
+            VolumeObservation(3, "missing-status", 0, 1000, None),
+        ]
+        anomalies = detect_silent_failures(obs, threshold_pct=40, min_baseline=100)
+        self.assertEqual([a.flow_id for a in anomalies], [1, 2])
+
+    def test_skips_clearly_unhealthy_or_not_running_statuses(self):
+        obs = [
+            VolumeObservation(1, "red", 0, 1000, "RED"),
+            VolumeObservation(2, "error", 0, 1000, "ERROR"),
+            VolumeObservation(3, "failed", 0, 1000, "FAILED"),
+            VolumeObservation(4, "paused", 0, 1000, "PAUSED"),
+            VolumeObservation(5, "stopped", 0, 1000, "STOPPED"),
+            VolumeObservation(6, "inactive", 0, 1000, "INACTIVE"),
+        ]
+        self.assertEqual(detect_silent_failures(obs, threshold_pct=40, min_baseline=100), [])
 
 
 class SilentFailureMonitorTests(unittest.TestCase):
@@ -169,7 +189,7 @@ class SilentFailureMonitorTests(unittest.TestCase):
 
             def list_flow_volumes(self, day):
                 count = 50 if day == today else 1000
-                return [{"origin_node_id": 55, "name": "Orders Export", "latestRecordCount": count}]
+                return [{"origin_node_id": 55, "name": "Orders Export", "latestRecordCount": count, "healthStatus": "GREEN"}]
 
             def get_flow_health(self, flow_id):
                 return {"healthStatus": "GREEN", "latestRunId": "r1", "latestRecordCount": 50}
@@ -281,7 +301,7 @@ class SilentFailureResilienceTests(unittest.TestCase):
 
             def list_flow_volumes(self, day):
                 if day == today:
-                    return [{"origin_node_id": 55, "name": "Orders", "latestRecordCount": 50}]
+                    return [{"origin_node_id": 55, "name": "Orders", "latestRecordCount": 50, "healthStatus": "GREEN"}]
                 return []  # yesterday's window unavailable from the API
 
             def get_flow_health(self, flow_id):

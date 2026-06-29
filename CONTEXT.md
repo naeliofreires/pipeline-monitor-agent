@@ -1,6 +1,6 @@
 # Pipeline Monitoring Agent
 
-A proactive agent that watches Nexla flows, finds problems, explains them in plain language, and tells the operator what to do. It never takes any action on its own — it only watches and reports.
+A proactive agent that watches Nexla flows, finds problems, explains them in plain language, and tells the operator what to do. The automatic monitor is read-only — it only watches and reports. Supervised, user-initiated Slack flow controls are an explicit ADR 0007 exception, preferably using a separate service key.
 
 ## Language
 
@@ -11,7 +11,7 @@ A Nexla data pipeline made up of a source, a transform step, and a destination. 
 _Avoid_: pipeline, job, data flow (different term used in admin-api)
 
 **Anomaly**:
-A problem detected in a flow — something that does not look right. There are two types: Explicit Failure and Silent Failure.
+A problem detected in a flow — something that does not look right. There are three types: Explicit Failure, Silent Failure, and `health_sweep`.
 _Avoid_: error, issue, problem, incident
 
 **Explicit Failure**:
@@ -21,6 +21,10 @@ _Avoid_: notification error, platform error
 **Silent Failure**:
 An anomaly found by comparing volume numbers — the flow is running but processing 40% or more fewer records than it did at the same time yesterday. Nexla did not send a notification for it.
 _Avoid_: volume anomaly, metric alert, quiet failure
+
+**Health Sweep** (`health_sweep`):
+An anomaly found by the org health sweep when a Flow appears RED and there is no already-processed Nexla notification for it.
+_Avoid_: health alert, org health issue, red flow notification
 
 **Enrichment**:
 The read-only step that gathers a flow's health, latest run status, record/error counts, and error log lines after an Anomaly is detected and before it is classified.

@@ -6,8 +6,8 @@
 | Team           | Data Engineering                       |
 | Status         | Draft — implementation started         |
 | Created        | 2026-06-26                             |
-| Last updated   | 2026-06-27                             |
-| ADRs           | [0001](../docs/adr/0001-read-only-agent.md) · [0002](../docs/adr/0002-deterministic-detection-llm-classification.md) · [0003](../docs/adr/0003-enrich-anomalies-before-classification.md) · [0004](../docs/adr/0004-sqlite-state-suppression-window.md) · [0005](../docs/adr/0005-silent-failure-volume-detection.md) · [0006](../docs/adr/0006-redact-error-text-before-alert-and-llm.md) |
+| Last updated   | 2026-06-29                             |
+| ADRs           | [0001](../docs/adr/0001-read-only-agent.md) · [0002](../docs/adr/0002-deterministic-detection-llm-classification.md) · [0003](../docs/adr/0003-enrich-anomalies-before-classification.md) · [0004](../docs/adr/0004-sqlite-state-suppression-window.md) · [0005](../docs/adr/0005-silent-failure-volume-detection.md) · [0006](../docs/adr/0006-redact-error-text-before-alert-and-llm.md) · [0007](../docs/adr/0007-supervised-slack-flow-controls.md) |
 | Glossary       | [CONTEXT.md](../CONTEXT.md)           |
 
 ---
@@ -98,7 +98,7 @@ Everything in the MVP, plus:
 
 ### ❌ Out of Scope (v1)
 
-- Taking any action on flows (`flows.pause()`, `flows.activate()`) — the agent does not touch flows
+- Automatic actions on flows (`flows.pause()`, `flows.activate()`) — the automatic monitor only watches and reports; supervised, user-initiated Slack controls are the ADR 0007 exception, preferably with a separate service key
 - Instatus integration (status page) — planned for v2, after checking detection quality
 - Email alerts — console and optional Slack bot delivery are enough during development
 - Web interface or dashboard
@@ -108,8 +108,7 @@ Everything in the MVP, plus:
 
 ### 🔮 Future (v2+)
 
-- Supervised actions where the operator approves before anything happens
-- Automatic actions for low-risk failures, after confirming that detection is reliable
+- Supervised Slack flow controls where the operator explicitly initiates the control action (ADR 0007)
 - Instatus integration to open and close incidents automatically
 - Escalating from console output to PagerDuty after X hours without resolution
 
@@ -119,7 +118,7 @@ Everything in the MVP, plus:
 
 ### Overview
 
-A Python service running inside a Docker container. It checks for problems every 5 minutes. Detection is done by code: unread Nexla notifications for hard failures, volume comparison for quiet ones. The LLM is only called after a problem is found — to classify how serious it is and to write the Alert explanation.
+A Python service running inside a Docker container. It checks for problems every 5 minutes. Detection is done by code: unread Nexla notifications for hard failures, volume comparison for quiet ones, and an org health sweep for RED flows without an already-processed Nexla notification. The LLM is only called after a problem is found — to classify how serious it is and to write the Alert explanation.
 
 ### Target Architecture
 
@@ -168,8 +167,8 @@ This is the target data flow. The current code implements it end-to-end: the Exp
 
 1. **APScheduler** runs the loop every 300 seconds
 2. **Primary layer** — fetches unread notifications from the last hour via `client.notifications.list(read=0, from_timestamp=...)`; each one is a possible Explicit Failure
-3. **Volume layer** — reads per-flow record volume for today's and yesterday's UTC date windows via `flows.get_org_health_flows(from_date, to_date)` and flags flows whose volume dropped at least `detection.volume_threshold_pct` (default 40%); also fetches RED flows via Nexla org health for the `health_sweep`
-4. **Dedup check** — for Explicit Failures: checks if the notification is already marked as `read`; for Silent Failures: checks SQLite for an existing alert record for `(flow_id, 'silent_failure')` within the Suppression Window
+3. **Volume and health layers** — reads per-flow record volume for today's and yesterday's UTC date windows via `flows.get_org_health_flows(from_date, to_date)` and flags flows whose volume dropped at least `detection.volume_threshold_pct` (default 40%); also fetches RED flows via Nexla org health and creates a `health_sweep` Anomaly only when there is no already-processed Nexla notification for that Flow
+4. **Dedup check** — for Explicit Failures: checks if the notification is already marked as `read`; for Silent Failures and `health_sweep`: checks SQLite for an existing alert record for `(flow_id, anomaly_type)` within the Suppression Window
 5. **Blocklist check** — drops any problem from flows listed in `config.yaml`
 6. **Enrichment** — gathers Evidence for each Anomaly: flow health, latest run status, record/error counts, and top error logs
 7. **LLM call** — for each new problem, sends the Anomaly plus Evidence and gets back `risk_classification`, `explanation`, `recommended_action`
@@ -308,7 +307,7 @@ Both tables are implemented. `suppression` stores `alerted_at` / `suppressed_unt
 CREATE TABLE suppression (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   flow_id          INTEGER  NOT NULL,
-  anomaly_type     TEXT     NOT NULL,  -- 'explicit_failure' | 'silent_failure'
+  anomaly_type     TEXT     NOT NULL,  -- 'explicit_failure' | 'silent_failure' | 'health_sweep'
   alerted_at       DATETIME NOT NULL,
   suppressed_until DATETIME NOT NULL
 );
@@ -402,7 +401,7 @@ All sensitive values come from environment variables — never from `config.yaml
 
 ### Nexla access
 
-The agent uses a **service key**, not a personal user account. The key should have the minimum permissions needed: read access to flows, metrics, and notifications, plus notification read-state update if Nexla's `mark_read` API is used for demo deduplication. It must not have flow write permissions (create, update, delete, pause, activate).
+The automatic monitor uses a **service key**, not a personal user account. The key should have the minimum permissions needed: read access to flows, metrics, and notifications, plus notification read-state update if Nexla's `mark_read` API is used for demo deduplication. It must not have flow write permissions (create, update, delete, pause, activate). Supervised, user-initiated Slack flow controls are the ADR 0007 exception and should preferably use a separate service key.
 
 ### What not to log
 
@@ -424,6 +423,7 @@ The agent uses a **service key**, not a personal user account. The key should ha
 **Detection**:
 - Flow with `status = failed` → detected as Explicit Failure
 - Flow with volume = 0 today vs 5,000 yesterday → detected as Silent Failure
+- Flow appears RED in org health with no already-processed notification → detected as `health_sweep`
 - Flow in Blocklist → no Alert sent
 - Flow already alerted 30 min ago → suppressed by Suppression Window
 
@@ -474,7 +474,7 @@ The agent uses a **service key**, not a personal user account. The key should ha
 | Decision made | Alternative dropped | Why it was dropped |
 |---------------|---------------------|--------------------|
 | LLM called only after code finds a problem | LLM looks at all flows every cycle | Cost and speed get worse as the number of flows grows; `status == 'failed'` does not need AI to be spotted |
-| Agent only watches — no actions | Automatic actions (pause/activate) from v1 | We do not know the false alert rate yet; a false positive that pauses a real flow has immediate impact; validate detection first |
+| Automatic monitor stays read-only, with supervised Slack controls as an ADR 0007 exception | Automatic actions (pause/activate) from v1 | We do not know the false alert rate yet; a false positive that pauses a real flow has immediate impact. Slack controls must be explicitly user-initiated and preferably use a separate service key. |
 | Window-to-window volume comparison | Rolling average over 7 days | Needs 7+ days of data before it works; a simple threshold is enough for v1 and easy to tune |
 | SQLite for state | No state (re-alert every cycle) | A broken flow would flood the console; the Nexla `read` flag alone does not cover Silent Failures |
 | Console output plus opt-in Slack bot during development | Instatus from day one | An incident on a public status page is visible to end users; a false positive there creates unnecessary alarm; validate detection first |

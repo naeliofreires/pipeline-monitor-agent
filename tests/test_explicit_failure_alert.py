@@ -18,6 +18,7 @@ from modules.enrichment.enricher import Evidence, enrich_anomaly
 from modules.classification.classifier import classify_anomaly
 from modules.alerting.alert import build_anomaly_alert_text
 from modules.alerting.sender import ConsoleAlertSender, SlackBotAlertSender, build_alert_sender
+from modules.controls.policy import ControlMetadata
 from monitor import monitor_once
 from main import ConfigError, load_config, run_slack_smoke
 
@@ -201,13 +202,14 @@ class AlertTests(unittest.TestCase):
 
     def test_build_alert_sender_returns_slack_when_enabled_and_configured(self):
         sender = build_alert_sender(
-            {"slack": {"enabled": True, "bot_token": "xoxb-token", "channel_id": "C123", "api_url": "https://slack.test/post"}}
+            {"slack": {"enabled": True, "bot_token": "xoxb-token", "channel_id": "C123", "api_url": "https://slack.test/post", "flow_url_template": "https://dataops.nexla.io/flows/{flow_id}"}}
         )
 
         self.assertIsInstance(sender, SlackBotAlertSender)
         self.assertEqual(sender.bot_token, "xoxb-token")
         self.assertEqual(sender.channel_id, "C123")
         self.assertEqual(sender.api_url, "https://slack.test/post")
+        self.assertEqual(sender.flow_url_template, "https://dataops.nexla.io/flows/{flow_id}")
 
     def test_slack_sender_posts_expected_request(self):
         requests = []
@@ -265,12 +267,110 @@ class AlertTests(unittest.TestCase):
         with patch("modules.alerting.sender.urllib.request.urlopen", lambda request: requests.append(request) or FakeResponse()):
             SlackBotAlertSender("xoxb-token", "C123", "https://slack.test/post").send(alert_text)
 
-        posted_text = json.loads(requests[0].data.decode("utf-8"))["text"]
+        payload = json.loads(requests[0].data.decode("utf-8"))
+        posted_text = payload["text"]
+        block_text = payload["blocks"][0]["text"]
         self.assertIn('*🔴 [HIGH] Flow "Orders" — Explicit Failure*', posted_text)
         self.assertNotIn("━", posted_text)
         self.assertIn("*Explanation:* Destination rejected records", posted_text)
         self.assertIn("*Recommended Action:* Fix credentials", posted_text)
         self.assertIn("_Flow ID: 42 | Detected: 2026-01-01T00:00:00+00:00_", posted_text)
+        self.assertEqual(block_text["type"], "mrkdwn")
+        self.assertEqual(block_text["text"], posted_text)
+
+    def test_slack_sender_converts_html_anchor_links_to_mrkdwn_links(self):
+        requests = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"ok": true}'
+
+        alert_text = "\n".join(
+            [
+                '⚪ [UNKNOWN] Flow "628329" — Explicit Failure',
+                "━" * 60,
+                'Message: Errors were observed for Source <a href=\\"https://dataops.nexla.io/sources/124542\\">web-hook-test</a> (Source ID: <a href=\\"https://dataops.nexla.io/sources/124542\\">124542</a>).',
+                "",
+                "Explanation: Review source details",
+                "Recommended Action: Review the Nexla notification and flow run details before taking action.",
+                "",
+                "Flow ID: unknown | Detected: unknown time",
+            ]
+        )
+
+        with patch("modules.alerting.sender.urllib.request.urlopen", lambda request: requests.append(request) or FakeResponse()):
+            SlackBotAlertSender("xoxb-token", "C123", "https://slack.test/post").send(alert_text)
+
+        payload = json.loads(requests[0].data.decode("utf-8"))
+        posted_text = payload["text"]
+        visible_text = payload["blocks"][0]["text"]
+        self.assertEqual(visible_text["type"], "mrkdwn")
+        self.assertIn("<https://dataops.nexla.io/sources/124542|web-hook-test>", visible_text["text"])
+        self.assertIn("<https://dataops.nexla.io/sources/124542|124542>", visible_text["text"])
+        self.assertIn("<https://dataops.nexla.io/sources/124542|web-hook-test>", posted_text)
+        self.assertIn("<https://dataops.nexla.io/sources/124542|124542>", posted_text)
+        self.assertNotIn("<a href=", posted_text)
+
+    def test_slack_sender_adds_open_flow_button_with_configured_url(self):
+        requests = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"ok": true}'
+
+        with patch("modules.alerting.sender.urllib.request.urlopen", lambda request: requests.append(request) or FakeResponse()):
+            SlackBotAlertSender(
+                "xoxb-token",
+                "C123",
+                "https://slack.test/post",
+                controls_config={"enabled": False},
+                flow_url_template="https://dataops.nexla.io/flows/{flow_id}",
+            ).send("Flow Alert", ControlMetadata(flow_id=42, flow_name="Orders"))
+
+        payload = json.loads(requests[0].data.decode("utf-8"))
+        actions = payload["blocks"][1]
+        self.assertEqual(actions["type"], "actions")
+        self.assertEqual(actions["elements"][0]["type"], "button")
+        self.assertEqual(actions["elements"][0]["text"], {"type": "plain_text", "text": "Open Flow"})
+        self.assertEqual(actions["elements"][0]["url"], "https://dataops.nexla.io/flows/42")
+
+    def test_slack_sender_omits_open_flow_button_without_template_or_flow_id(self):
+        requests = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"ok": true}'
+
+        with patch("modules.alerting.sender.urllib.request.urlopen", lambda request: requests.append(request) or FakeResponse()):
+            SlackBotAlertSender("xoxb-token", "C123", "https://slack.test/post", flow_url_template="").send(
+                "Flow Alert", ControlMetadata(flow_id=42)
+            )
+            SlackBotAlertSender("xoxb-token", "C123", "https://slack.test/post", flow_url_template="https://dataops.nexla.io/flows/{flow_id}").send(
+                "Flow Alert", ControlMetadata(flow_id=None)
+            )
+
+        for request in requests:
+            payload = json.loads(request.data.decode("utf-8"))
+            elements = [element for block in payload.get("blocks", []) if block.get("type") == "actions" for element in block.get("elements", [])]
+            self.assertFalse(any(element.get("text", {}).get("text") == "Open Flow" for element in elements))
 
     def test_slack_sender_raises_when_slack_ok_false(self):
         class FakeResponse:
@@ -356,6 +456,60 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(any("Recommended Action: Restart flow" in alert for alert in sent_alerts))
         self.assertEqual(events[-1], ("mark_read", [10]))
         self.assertIn(("classify", 0, 77, "RED"), events)
+
+    def test_monitor_does_not_mark_notification_read_when_sender_fails(self):
+        events = []
+
+        class FailingAlertSender:
+            def send(self, *args):
+                events.append(("send",))
+                raise RuntimeError("sender down")
+
+        class FakeNexlaAdapter:
+            def __init__(self, service_key, api_url=None):
+                pass
+
+            def list_unread_notifications(self, from_timestamp=None):
+                return [{"id": 10, "resource_id": 42, "resource_name": "Pipe", "level": "ERROR", "resource_type": "flow", "message": "Failed hard"}]
+
+            def resolve_flow(self, resource_type, resource_id):
+                return 42
+
+            def list_unhealthy_flows(self):
+                return []
+
+            def list_flow_volumes(self, day):
+                return []
+
+            def get_flow_health(self, flow_id):
+                return {"healthStatus": "RED", "latestRunId": "r1"}
+
+            def get_run_status(self, flow_id, run_id):
+                return {"status": "FAILED"}
+
+            def get_run_metrics(self, flow_id, resource_type=None, resource_id=None, run_id=None):
+                return {"records": 0, "errors": 1}
+
+            def get_flow_error_logs(self, flow_id, run_id, limit=5):
+                return [{"level": "ERROR", "message": "boom"}]
+
+            def mark_notifications_read(self, ids):
+                events.append(("mark_read", ids))
+
+        class FakeOpencodeAdapter:
+            def __init__(self, model, base_url):
+                pass
+
+            def classify_anomaly(self, payload):
+                return {"risk_classification": "high", "explanation": "Known failure", "recommended_action": "Inspect flow"}
+
+        config = {"nexla": {"service_key": "sk"}, "monitoring": {"notification_lookback_hours": None, "state_db_path": ":memory:"}}
+
+        with patch("monitor.NexlaAdapter", FakeNexlaAdapter), patch("monitor.OpencodeAdapter", FakeOpencodeAdapter):
+            monitor_once(config, alert_sender=FailingAlertSender())
+
+        self.assertIn(("send",), events)
+        self.assertEqual(events[-1], ("mark_read", []))
 
 
 class ConfigTests(unittest.TestCase):

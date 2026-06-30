@@ -115,10 +115,14 @@ returning plain dicts/values (not raw SDK models), each read-only:
   `errorSummary`).
 - `get_run_status(flow_id, run_id)` → `flows.get_run_status(flow_id, run_id)`.
 - `get_flow_error_logs(flow_id, run_id, limit)` → `flows.search_flow_logs(flow_id,
-  severity="ERROR", run_ids=[run_id], size=limit)`; return only the top `limit`
-  `FlowLogEntry` lines (`level`, `message`, `timestamp`).
+  severity="ERROR", run_ids=[run_id], size=limit)`; `run_id` may be a single id or
+  a small list of latest/recent run ids. Return only the top `limit` `FlowLogEntry`
+  lines (`level`, `message`, `timestamp`).
 - `get_run_metrics(flow_id)` → `metrics.get_resource_metrics_by_run(...)` for the
   latest run (`records`, `errors`, `size`).
+- `get_run_summary(flow_id, resource_type, resource_id, run_id)` → the source/sink
+  `/metrics/run_summary` shape when available. Treat it as optional historical
+  Evidence and attribute returned runs to the resource used for the call.
 - Each method catches SDK/transport errors and returns `None` (or `[]` for logs)
   so the caller can degrade. Log failures at `DEBUG` (error messages may contain
   table/connection names — see TDD Security).
@@ -142,11 +146,18 @@ This is the heart of moving beyond flow-level metrics.
   `enrich_anomaly(anomaly, nexla_adapter) -> Evidence`.
 - `Evidence` is a frozen dataclass: `health_status`, `run_status`, `latest_run_id`,
   `records_this_run`, `errors_this_run`, `error_summary`, `top_error_logs`
-  (list of short strings), and a `partial: bool` flag set when any read failed.
+  (list of short strings), compact run-summary trend fields
+  (`recent_run_count`, `avg_records_previous_runs`, `latest_records_from_summary`,
+  `record_drop_pct`, `latest_errors_from_summary`, `consecutive_failed_runs`),
+  `recent_run_log_check`, and a `partial: bool` flag set when required reads failed.
 - Flow: if `anomaly.flow_id` is `None` → return empty Evidence with
   `partial=True`. Otherwise call `get_flow_health` to learn `latestRunId`, then
-  `get_run_status`, `get_run_metrics`, and `get_flow_error_logs` (capped, e.g.
-  top 5). Any individual `None` result leaves that field empty and sets `partial`.
+  `get_run_status`, `get_run_metrics`, optional `get_run_summary`, and
+  `get_flow_error_logs` (capped, e.g. top 5). If run-summary rows provide recent
+  run ids, pass those ids to the log lookup so the log check covers latest/recent
+  Flow runs instead of only the latest run. Any required `None` result leaves that
+  field empty and sets `partial`; optional run-summary failure does not by itself
+  make Evidence partial.
 - The module does **not** import the SDK; it only uses the injected adapter
   (`AnomalyEnricher` Protocol, mirroring the `AnomalyClassifier` Protocol pattern
   in `classifier.py:15`).
@@ -155,8 +166,9 @@ This is the heart of moving beyond flow-level metrics.
   classify_anomaly(anomaly, evidence, llm)`.
 
 **Acceptance.**
-- With all reads succeeding, Evidence carries health, run status, counts, and
-  error log lines.
+- With all reads succeeding, Evidence carries health, run status, counts,
+  run-summary trends when available, error log lines, and whether the latest/recent
+  run log check found Anomalies, found none, or was inconclusive.
 - With any read failing, `partial=True` and the loop still classifies and prints.
 - Enrichment is pure orchestration — no `import nexla_sdk` in the module.
 
@@ -177,13 +189,18 @@ Action are grounded in observed state, not a headline.
   cite the specific errors / run status / counts in `explanation`, and to base
   `recommended_action` on them. Keep the strict JSON output contract
   (`risk_classification`, `explanation`, `recommended_action`).
+  The explanation must explicitly mention the latest/recent Flow run log check:
+  summarize Nexla ERROR log Anomalies when present, say no ERROR log Anomalies were
+  found when the check succeeded with no rows, or say the check was inconclusive
+  when Evidence is partial/missing.
 - `src/modules/alerting/alert.py`: add an Evidence block to the Alert text
   (health status, run status, records/errors this run, and the top error line) so
   the operator sees the evidence even when the LLM is in fallback.
 
 **Acceptance.**
-- The payload sent to the LLM contains health status, run status, counts, and
-  error log lines when present.
+- The payload sent to the LLM contains health status, run status, counts,
+  run-summary trends, the recent run log-check result, and error log lines when
+  present.
 - A `partial` Evidence still classifies (the LLM is told which fields are missing).
 - The Alert shows the Evidence block; `uncertain → high` and the `unknown`
   fallback still hold.

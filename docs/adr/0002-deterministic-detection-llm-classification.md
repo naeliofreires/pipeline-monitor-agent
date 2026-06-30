@@ -6,4 +6,4 @@ The original plan was to send all flow data to the LLM every cycle and let it de
 
 **Consequence**: how well the agent finds Silent Failures depends on the volume threshold setting. Flows that naturally vary a lot may trigger false alerts — this is the trade-off we accepted to keep the LLM out of the detection step.
 
-**Update**: [ADR-0003](0003-enrich-anomalies-before-classification.md) adds a deterministic enrichment step between detection and classification. It does not change this decision — the LLM is still called only after code finds a problem — it just gathers flow health, run status, and error logs (in code) so the LLM classifies over real evidence instead of the notification message alone.
+**Update**: [ADR-0003](0003-enrich-anomalies-before-classification.md) adds a deterministic enrichment step between detection and classification. It does not change this decision — the LLM is still called only after code finds an Anomaly — it gathers flow health, run status, run-summary trends, and latest/recent run ERROR logs in code so the LLM classifies over real Evidence instead of the notification message alone.

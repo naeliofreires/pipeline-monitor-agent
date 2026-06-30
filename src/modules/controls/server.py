@@ -7,16 +7,20 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from modules.controls.policy import authorize, parse_action_value
+from modules.controls.policy import authorize, authorize_slack_command, parse_action_value
 from modules.controls.signature import verify_slack_signature
 
 logger = logging.getLogger(__name__)
 
 
-def start_interaction_server(config: dict[str, Any], audit: Any, executor: Any) -> ThreadingHTTPServer:
+def start_interaction_server(
+    config: dict[str, Any], audit: Any, executor: Any, command_executor: Any | None = None
+) -> ThreadingHTTPServer:
     controls = config.get("controls", {})
     slack = config.get("slack", {})
-    path = str(controls.get("interactions_path") or "/slack/interactions")
+    interactions_path = str(controls.get("interactions_path") or "/slack/interactions")
+    commands_path = str(controls.get("commands_path") or "/slack/commands")
+    command_paths = {commands_path, "/slack/command"}
     ttl = int(controls.get("action_ttl_seconds") or 900)
     secret = str(slack.get("signing_secret") or "")
     if not secret:
@@ -25,14 +29,19 @@ def start_interaction_server(config: dict[str, Any], audit: Any, executor: Any) 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802
             raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            if self.path != path:
-                logger.warning("Rejected Slack interaction on invalid path: %s", self.path)
+            if self.path not in {interactions_path, *command_paths}:
+                logger.warning("Rejected Slack request on invalid path: %s", self.path)
                 audit.record(result="denied", reason="invalid interaction path")
                 self._reply(403, "denied"); return
             if not verify_slack_signature(raw, self.headers.get("X-Slack-Request-Timestamp", ""), self.headers.get("X-Slack-Signature", ""), secret):
-                logger.warning("Rejected Slack interaction with invalid signature")
+                logger.warning("Rejected Slack request with invalid signature")
                 audit.record(result="denied", reason="invalid Slack signature")
                 self._reply(403, "denied"); return
+            if self.path in command_paths:
+                self._handle_command(raw); return
+            self._handle_interaction(raw)
+
+        def _handle_interaction(self, raw: bytes) -> None:
             try:
                 form = urllib.parse.parse_qs(raw.decode())
                 payload = json.loads(form.get("payload", [""])[0])
@@ -65,6 +74,36 @@ def start_interaction_server(config: dict[str, Any], audit: Any, executor: Any) 
                 audit.record(result="accepted", actor_user_id=user, team_id=team, channel_id=channel, action=parsed.action, flow_id=parsed.flow_id, correlation_id=parsed.correlation_id)
                 executor.enqueue(parsed, payload, payload.get("response_url"))
                 self._reply(200, "Control request accepted.")
+            except Exception as exc:
+                audit.record(result="denied", reason=str(exc))
+                self._reply(200, "Denied.")
+
+        def _handle_command(self, raw: bytes) -> None:
+            try:
+                form = urllib.parse.parse_qs(raw.decode())
+                reason = authorize_slack_command(form, config)
+                user = (form.get("user_id") or [None])[0]
+                team = (form.get("team_id") or [None])[0]
+                channel = (form.get("channel_id") or [None])[0]
+                text = ((form.get("text") or [""])[0] or "").strip()
+                action = (text.split(maxsplit=1)[0].lower() if text else "help")
+                logger.info(
+                    "Received Slack command command=%s text=%s actor=%s team=%s channel=%s",
+                    (form.get("command") or [""])[0],
+                    text,
+                    user,
+                    team,
+                    channel,
+                )
+                if reason:
+                    logger.warning("Denied Slack command action=%s actor=%s reason=%s", action, user, reason)
+                    audit.record(result="denied", actor_user_id=user, team_id=team, channel_id=channel, action=action, reason=reason)
+                    self._reply(200, "Denied."); return
+                if command_executor is None:
+                    audit.record(result="denied", actor_user_id=user, team_id=team, channel_id=channel, action=action, reason="commands disabled")
+                    self._reply(200, "Commands are not enabled."); return
+                audit.record(result="accepted", actor_user_id=user, team_id=team, channel_id=channel, action=action)
+                self._reply(200, command_executor.handle(form))
             except Exception as exc:
                 audit.record(result="denied", reason=str(exc))
                 self._reply(200, "Denied.")

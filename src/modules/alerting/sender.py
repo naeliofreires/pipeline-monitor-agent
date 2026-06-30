@@ -78,7 +78,15 @@ def _format_slack_message(text: str) -> str:
         return text
 
     styled = [f"*{lines[0]}*"]
-    for line in lines[2:]:
+    metadata_lines = []
+    remaining_lines = lines[2:]
+    while remaining_lines and _is_notification_metadata_line(remaining_lines[0]):
+        metadata_lines.append(remaining_lines.pop(0))
+
+    if metadata_lines:
+        styled.extend(_format_notification_metadata_header(metadata_lines))
+
+    for line in remaining_lines:
         if line.startswith("Explanation: "):
             styled.append(f"*Explanation:* {line.removeprefix('Explanation: ')}")
         elif line.startswith("Recommended Action: "):
@@ -88,6 +96,17 @@ def _format_slack_message(text: str) -> str:
         else:
             styled.append(line)
     return "\n".join(styled)
+
+
+def _is_notification_metadata_line(line: str) -> bool:
+    return line.startswith(("Notification: ", "Resource: ", "Org: ", "Read: "))
+
+
+def _format_notification_metadata_header(lines: list[str]) -> list[str]:
+    formatted = ["", "*Enrichment Log*", "```"]
+    formatted.extend(lines)
+    formatted.append("```")
+    return formatted
 
 
 def _format_slack_links(text: str) -> str:
@@ -144,30 +163,36 @@ def _build_control_blocks(metadata: ControlMetadata | None, controls: dict[str, 
         return None
     if int(metadata.flow_id) in _flow_id_set(controls.get("protected_flows") or []):
         return None
-    # Render only the destructive stop-control for now. The control backend still
-    # supports activate for future use, but Slack Alerts should not invite users
-    # to restart a Flow until that UX is explicitly validated.
-    actions = [str(a) for a in controls.get("allowed_actions") or [] if str(a) == "pause"]
-    if not actions:
+    action = _control_action_for_status(metadata.flow_status, controls.get("allowed_actions") or [])
+    if action is None:
         return None
     action_signing_secret = str(controls.get("action_signing_secret") or "")
     if not action_signing_secret:
         return None
     elements = []
-    for action in actions:
-        elements.append({
-            "type": "button",
-            "text": {"type": "plain_text", "text": action.title()},
-            "action_id": f"flow_control_{action}",
-            "value": build_action_value(
-                int(metadata.flow_id),
-                action,
-                signing_secret=action_signing_secret,
-            ),
-            "style": "danger" if action == "pause" else "primary",
-            "confirm": {"title": {"type": "plain_text", "text": f"{action.title()} flow?"}, "text": {"type": "mrkdwn", "text": f"Confirm {action} for flow {metadata.flow_id}."}, "confirm": {"type": "plain_text", "text": "Confirm"}, "deny": {"type": "plain_text", "text": "Cancel"}},
-        })
+    elements.append({
+        "type": "button",
+        "text": {"type": "plain_text", "text": action.title()},
+        "action_id": f"flow_control_{action}",
+        "value": build_action_value(
+            int(metadata.flow_id),
+            action,
+            signing_secret=action_signing_secret,
+        ),
+        "style": "danger" if action == "pause" else "primary",
+        "confirm": {"title": {"type": "plain_text", "text": f"{action.title()} flow?"}, "text": {"type": "mrkdwn", "text": f"Confirm {action} for flow {metadata.flow_id}."}, "confirm": {"type": "plain_text", "text": "Confirm"}, "deny": {"type": "plain_text", "text": "Cancel"}},
+    })
     return [{"type": "actions", "elements": elements}]
+
+
+def _control_action_for_status(status: str | None, allowed_actions: Any) -> str | None:
+    allowed = {str(action).lower() for action in allowed_actions or []}
+    normalized = str(status or "").strip().upper()
+    if normalized in {"PAUSED", "PAUSE", "INACTIVE", "STOPPED", "STOP", "DISABLED"}:
+        return "activate" if "activate" in allowed else None
+    if normalized in {"ACTIVE", "RUNNING", "GREEN", "HEALTHY"}:
+        return "pause" if "pause" in allowed else None
+    return None
 
 
 def _flow_id_set(entries: Any) -> set[int]:

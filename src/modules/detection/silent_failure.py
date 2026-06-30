@@ -9,6 +9,10 @@ from modules.parsing import get_value, optional_int
 # Default threshold: a flow is a Silent Failure when its volume drops by at least
 # this percentage versus the same window yesterday.
 DEFAULT_VOLUME_THRESHOLD_PCT = 40.0
+# Exceptional run-over-run threshold. The day-over-day rule remains the primary
+# signal; this catches sharp drops between the last captured run/observation and
+# the current one.
+DEFAULT_RUN_DROP_THRESHOLD_PCT = 80.0
 # Flows whose baseline volume is below this are too small/variable to alert on.
 DEFAULT_MIN_BASELINE_RECORDS = 100
 
@@ -21,6 +25,17 @@ class VolumeObservation:
     flow_name: str | None
     current_volume: int
     baseline_volume: int | None
+    status: str | None = None
+
+
+@dataclass(frozen=True)
+class RunVolumeObservation:
+    """A flow's current record volume versus the previous captured run/observation."""
+
+    flow_id: int
+    flow_name: str | None
+    current_volume: int
+    previous_volume: int | None
     status: str | None = None
 
 
@@ -107,6 +122,22 @@ def build_observations(
     return observations
 
 
+def build_run_observations(
+    current: dict[int, tuple[str | None, int, str | None]],
+    previous_volume: Callable[[int], int | None],
+) -> list[RunVolumeObservation]:
+    """Pair current flow volumes with the previous captured same-day volume.
+
+    The previous value comes from the snapshot store before the current tick upserts
+    today's latest count. This makes the comparison run/observation-over-run without
+    changing the day-over-day baseline behavior.
+    """
+    return [
+        RunVolumeObservation(flow_id, name, count, previous_volume(flow_id), status)
+        for flow_id, (name, count, status) in current.items()
+    ]
+
+
 def detect_silent_failures(
     observations: Iterable[VolumeObservation],
     *,
@@ -142,6 +173,46 @@ def detect_silent_failures(
         message = (
             f"Volume dropped {drop_pct:.0f}% versus the same window yesterday "
             f"({obs.current_volume} records today vs {baseline} yesterday)"
+        )
+        anomalies.append(
+            Anomaly(0, "silent_failure", obs.flow_id, obs.flow_name, "WARNING", None, "flow", message, None)
+        )
+    return anomalies
+
+
+def detect_run_drop_failures(
+    observations: Iterable[RunVolumeObservation],
+    *,
+    threshold_pct: float = DEFAULT_RUN_DROP_THRESHOLD_PCT,
+    min_baseline: int = DEFAULT_MIN_BASELINE_RECORDS,
+    per_flow_threshold: dict[int, float] | None = None,
+    exclude_flow_ids: set[int] | None = None,
+) -> list[Anomaly]:
+    """Flag exceptional drops versus the previous captured run/observation.
+
+    This is a secondary Silent Failure detector. It keeps the same conservative
+    requirements as the day-over-day rule: the flow must still look running/healthy,
+    have a meaningful previous volume, and not already have an Anomaly this tick.
+    """
+    excluded = exclude_flow_ids or set()
+    overrides = per_flow_threshold or {}
+    anomalies: list[Anomaly] = []
+
+    for obs in observations:
+        if obs.flow_id in excluded:
+            continue
+        if not _is_running_status(obs.status):
+            continue
+        previous = obs.previous_volume
+        if previous is None or previous <= 0 or previous < min_baseline:
+            continue
+        flow_threshold = float(overrides.get(obs.flow_id, threshold_pct))
+        drop_pct = (previous - obs.current_volume) / previous * 100
+        if drop_pct < flow_threshold:
+            continue
+        message = (
+            f"Volume dropped {drop_pct:.0f}% versus the previous run/observation "
+            f"({obs.current_volume} records now vs {previous} previously)"
         )
         anomalies.append(
             Anomaly(0, "silent_failure", obs.flow_id, obs.flow_name, "WARNING", None, "flow", message, None)

@@ -45,7 +45,13 @@ class OpencodeAdapterPromptTests(unittest.TestCase):
             "flow_id": 42,
             "flow_name": "Orders Flow",
             "resource_type": "data_sink",
-            "evidence": {"partial": True, "health_status": "RED", "records_this_run": 0, "errors_this_run": 3},
+            "evidence": {
+                "partial": True,
+                "health_status": "RED",
+                "records_this_run": 0,
+                "errors_this_run": 3,
+                "recent_run_log_check": "inconclusive: unable to check Nexla ERROR logs for the latest/recent runs",
+            },
         }
 
         result = OpencodeAdapter(client=client).classify_anomaly(payload)
@@ -56,6 +62,10 @@ class OpencodeAdapterPromptTests(unittest.TestCase):
         self.assertIn("Explicit Failure", prompt)
         self.assertIn("Silent Failure", prompt)
         self.assertIn("Capsule-like Flows", prompt)
+        self.assertIn("checked logs from the latest/recent runs of the Flow", prompt)
+        self.assertIn("no ERROR log Anomalies were found", prompt)
+        self.assertIn("log check was inconclusive", prompt)
+        self.assertIn('"recent_run_log_check": "inconclusive', prompt)
         self.assertIn("Return only JSON", prompt)
         self.assertIn('"flow_name": "Orders Flow"', prompt)
         self.assertIn("risk_classification (`low`, `high`, or `uncertain`)", NEXLA_ANOMALY_ANALYSIS_PROMPT)

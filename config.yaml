@@ -15,10 +15,13 @@ monitoring:
 detection:
   volume_threshold_pct: 40        # alert when volume drops >= 40% vs the same window yesterday
   min_baseline_records: 100       # ignore flows whose baseline is below this (too small/variable)
+  run_drop_threshold_pct: 80      # exceptional alert when latest run/observation drops >= 80% vs previous one
+  min_run_baseline_records: 100   # ignore run-over-run comparison below this previous volume
   flows: []                       # per-flow overrides for flows with high natural variance
 #  flows:
 #    - flow_id: 789
 #      volume_threshold_pct: 60
+#      run_drop_threshold_pct: 90
 
 # Flows that should never trigger an Alert (e.g. high natural variance, known-noisy).
 blocklist: []
@@ -47,7 +50,15 @@ controls:
   interactions_host: "127.0.0.1"
   interactions_port: 8080
   interactions_path: "/slack/interactions"
+  commands_path: "/slack/commands"
+
+llm:
+  provider: "openai"
 
 opencode:
   model: "big-pickle"
   base_url: "https://opencode.ai/zen/v1"
+
+openai:
+  model: "gpt-4.1-mini"
+  base_url: "https://api.openai.com/v1"

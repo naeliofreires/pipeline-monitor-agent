@@ -14,6 +14,7 @@ from typing import Any
 class ControlMetadata:
     flow_id: int | None
     flow_name: str | None = None
+    flow_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,24 @@ def authorize(parsed: ParsedAction, payload: dict[str, Any], config: dict[str, A
         return "user not allowed"
     team = (payload.get("team") or {}).get("id")
     channel = (payload.get("channel") or {}).get("id")
+    if slack.get("allowed_team_ids") and team not in set(map(str, slack.get("allowed_team_ids") or [])):
+        return "team not allowed"
+    if slack.get("allowed_channel_ids") and channel not in set(map(str, slack.get("allowed_channel_ids") or [])):
+        return "channel not allowed"
+    return None
+
+
+def authorize_slack_command(form: dict[str, list[str]], config: dict[str, Any]) -> str | None:
+    """Authorize a Slack Slash Command request with the same user/team/channel allowlists."""
+    controls = config.get("controls", {}) if isinstance(config.get("controls"), dict) else {}
+    slack = config.get("slack", {}) if isinstance(config.get("slack"), dict) else {}
+    if not controls.get("enabled"):
+        return "controls disabled"
+    user = (form.get("user_id") or [None])[0]
+    if user not in set(map(str, slack.get("allowed_user_ids") or [])):
+        return "user not allowed"
+    team = (form.get("team_id") or [None])[0]
+    channel = (form.get("channel_id") or [None])[0]
     if slack.get("allowed_team_ids") and team not in set(map(str, slack.get("allowed_team_ids") or [])):
         return "team not allowed"
     if slack.get("allowed_channel_ids") and channel not in set(map(str, slack.get("allowed_channel_ids") or [])):

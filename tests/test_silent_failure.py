@@ -7,7 +7,9 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from modules.detection.silent_failure import (
+    RunVolumeObservation,
     VolumeObservation,
+    detect_run_drop_failures,
     detect_silent_failures,
     extract_flow_volumes,
 )
@@ -169,6 +171,47 @@ class DetectSilentFailureTests(unittest.TestCase):
         ]
         self.assertEqual(detect_silent_failures(obs, threshold_pct=40, min_baseline=100), [])
 
+    def test_run_drop_flags_exceptional_previous_run_drop(self):
+        anomalies = detect_run_drop_failures(
+            [RunVolumeObservation(55, "Orders", 100, 1000, "GREEN")],
+            threshold_pct=80,
+            min_baseline=100,
+        )
+        self.assertEqual(len(anomalies), 1)
+        self.assertEqual(anomalies[0].type, "silent_failure")
+        self.assertEqual(anomalies[0].flow_id, 55)
+        self.assertIn("previous run/observation", anomalies[0].message)
+        self.assertIn("90%", anomalies[0].message)
+
+    def test_run_drop_skips_below_threshold_small_baseline_and_excluded_flows(self):
+        below_threshold = detect_run_drop_failures(
+            [RunVolumeObservation(55, "Orders", 300, 1000, "GREEN")], threshold_pct=80, min_baseline=100
+        )
+        small_previous = detect_run_drop_failures(
+            [RunVolumeObservation(56, "Tiny", 0, 10, "GREEN")], threshold_pct=80, min_baseline=100
+        )
+        excluded = detect_run_drop_failures(
+            [RunVolumeObservation(57, "Excluded", 0, 1000, "GREEN")],
+            threshold_pct=80,
+            min_baseline=100,
+            exclude_flow_ids={57},
+        )
+        self.assertEqual(below_threshold, [])
+        self.assertEqual(small_previous, [])
+        self.assertEqual(excluded, [])
+
+    def test_run_drop_requires_running_or_healthy_status(self):
+        anomalies = detect_run_drop_failures(
+            [
+                RunVolumeObservation(1, "healthy", 0, 1000, "GREEN"),
+                RunVolumeObservation(2, "failed", 0, 1000, "FAILED"),
+                RunVolumeObservation(3, "unknown", 0, 1000, None),
+            ],
+            threshold_pct=80,
+            min_baseline=100,
+        )
+        self.assertEqual([a.flow_id for a in anomalies], [1])
+
 
 class SilentFailureMonitorTests(unittest.TestCase):
     """A flow whose volume collapsed day-over-day alerts once, then is suppressed."""
@@ -207,9 +250,6 @@ class SilentFailureMonitorTests(unittest.TestCase):
                 pass
 
         class FakeOpencodeAdapter:
-            def __init__(self, model, base_url):
-                pass
-
             def classify_anomaly(self, payload):
                 classify_calls.append((payload["flow_id"], payload["type"]))
                 return {
@@ -232,7 +272,7 @@ class SilentFailureMonitorTests(unittest.TestCase):
         }
 
         with patch("monitor.NexlaAdapter", FakeNexlaAdapter), patch(
-            "monitor.OpencodeAdapter", FakeOpencodeAdapter
+            "monitor.build_llm_adapter", return_value=FakeOpencodeAdapter()
         ), patch("monitor.build_suppression_repository", return_value=suppression), patch(
             "monitor.build_snapshot_repository", return_value=snapshots
         ):
@@ -248,6 +288,84 @@ class SilentFailureMonitorTests(unittest.TestCase):
         self.assertEqual(output.count("[HIGH]"), 1)
         self.assertIn("Silent Failure", output)
         self.assertEqual(snapshots.get_record_count(55, today), 50)
+
+    def test_run_over_run_drop_alerts_when_yesterday_rule_does_not_fire(self):
+        classify_calls = []
+        today = datetime.now(timezone.utc).date().isoformat()
+        yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+
+        class FakeNexlaAdapter:
+            def __init__(self, service_key, api_url=None):
+                pass
+
+            def list_unread_notifications(self, from_timestamp=None):
+                return []
+
+            def list_unhealthy_flows(self):
+                return []
+
+            def list_flow_volumes(self, day):
+                if day == today:
+                    return [{"origin_node_id": 55, "name": "Orders Export", "latestRecordCount": 100, "healthStatus": "GREEN"}]
+                return [{"origin_node_id": 55, "name": "Orders Export", "latestRecordCount": 120, "healthStatus": "GREEN"}]
+
+            def get_flow_health(self, flow_id):
+                return {"healthStatus": "GREEN", "latestRunId": "r2", "latestRecordCount": 100}
+
+            def get_run_status(self, flow_id, run_id):
+                return {"status": "SUCCESS"}
+
+            def get_run_metrics(self, flow_id, resource_type=None, resource_id=None, run_id=None):
+                return {"records": 100, "errors": 0}
+
+            def get_flow_error_logs(self, flow_id, run_id, limit=5):
+                return []
+
+            def mark_notifications_read(self, ids):
+                pass
+
+        class FakeOpencodeAdapter:
+            def classify_anomaly(self, payload):
+                classify_calls.append((payload["flow_id"], payload["type"], payload["message"]))
+                return {
+                    "risk_classification": "high",
+                    "explanation": "Run volume collapsed",
+                    "recommended_action": "Check the latest run",
+                }
+
+        from repositories.suppression_repository import SuppressionRepository
+
+        suppression = SuppressionRepository(":memory:")
+        snapshots = SnapshotRepository(":memory:")
+        snapshots.save_snapshot(55, today, 1000, datetime.now(timezone.utc))
+        snapshots.save_snapshot(55, yesterday, 120, datetime.now(timezone.utc))
+        suppression.close = lambda: None
+        snapshots.close = lambda: None
+        config = {
+            "nexla": {"service_key": "sk"},
+            "monitoring": {"notification_lookback_hours": None, "suppression_window_hours": 2},
+            "detection": {
+                "volume_threshold_pct": 40,
+                "min_baseline_records": 100,
+                "run_drop_threshold_pct": 80,
+                "min_run_baseline_records": 100,
+            },
+        }
+
+        with patch("monitor.NexlaAdapter", FakeNexlaAdapter), patch(
+            "monitor.build_llm_adapter", return_value=FakeOpencodeAdapter()
+        ), patch("monitor.build_suppression_repository", return_value=suppression), patch(
+            "monitor.build_snapshot_repository", return_value=snapshots
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                monitor_once(config)
+
+        self.assertEqual(len(classify_calls), 1)
+        self.assertEqual(classify_calls[0][0:2], (55, "silent_failure"))
+        self.assertIn("previous run/observation", classify_calls[0][2])
+        self.assertIn("Silent Failure", output.getvalue())
+        self.assertEqual(snapshots.get_record_count(55, today), 100)
 
 
 class SilentFailureResilienceTests(unittest.TestCase):
@@ -267,15 +385,12 @@ class SilentFailureResilienceTests(unittest.TestCase):
         snapshots.close = lambda: None
 
         class FakeOpencodeAdapter:
-            def __init__(self, model, base_url):
-                pass
-
             def classify_anomaly(self, payload):
                 classify_calls.append((payload["flow_id"], payload["type"]))
                 return {"risk_classification": "high", "explanation": "x", "recommended_action": "y"}
 
         with patch("monitor.NexlaAdapter", fake_nexla_cls), patch(
-            "monitor.OpencodeAdapter", FakeOpencodeAdapter
+            "monitor.build_llm_adapter", return_value=FakeOpencodeAdapter()
         ), patch("monitor.build_suppression_repository", return_value=suppression), patch(
             "monitor.build_snapshot_repository", return_value=snapshots
         ):

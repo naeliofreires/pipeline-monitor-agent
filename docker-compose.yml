@@ -5,6 +5,7 @@ services:
       NEXLA_SERVICE_KEY: ${NEXLA_SERVICE_KEY:-}
       NEXLA_API_URL: ${NEXLA_API_URL:-https://qa.nexla.com/nexla-api}
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       # Persist the SQLite Suppression Window across container restarts; if this

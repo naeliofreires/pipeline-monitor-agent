@@ -102,9 +102,6 @@ class SuppressionMonitorTests(unittest.TestCase):
                 pass
 
         class FakeOpencodeAdapter:
-            def __init__(self, model, base_url):
-                pass
-
             def classify_anomaly(self, payload):
                 classify_calls.append(payload["flow_id"])
                 return {"risk_classification": "high", "explanation": "red", "recommended_action": "look"}
@@ -123,7 +120,7 @@ class SuppressionMonitorTests(unittest.TestCase):
         }
 
         with patch("monitor.NexlaAdapter", FakeNexlaAdapter), patch(
-            "monitor.OpencodeAdapter", FakeOpencodeAdapter
+            "monitor.build_llm_adapter", return_value=FakeOpencodeAdapter()
         ), patch("monitor.build_suppression_repository", return_value=db):
             db.close = lambda: None  # keep the shared connection open across both ticks
             output = io.StringIO()

@@ -21,3 +21,10 @@ class Anomaly:
     resource_type: str | None
     message: str
     detected_at: datetime | str | None
+    owner_name: str | None = None
+    owner_email: str | None = None
+    org_name: str | None = None
+    access_roles: tuple[str, ...] = ()
+    read_at: datetime | str | None = None
+    created_at: datetime | str | None = None
+    updated_at: datetime | str | None = None

@@ -27,10 +27,11 @@ except ModuleNotFoundError:
 
 from config import require_str
 from modules.alerting.sender import build_alert_sender
+from modules.controls.commands import SlackCommandExecutor
 from modules.controls.config import ControlConfigError, controls_enabled, validate_control_config
 from modules.controls.executor import ControlExecutor
 from modules.controls.server import start_interaction_server
-from monitor import build_nexla_adapter, monitor_once
+from monitor import build_nexla_adapter, monitor_once, scan_flow
 from repositories.control_audit_repository import ControlAuditRepository
 
 logger = logging.getLogger(__name__)
@@ -128,7 +129,9 @@ def run_scheduler(config: dict[str, Any]) -> None:
         if not control_service_key:
             control_service_key = require_secret(config, ("nexla", "service_key"), "Nexla service key for temporary flow controls")
         adapter = build_nexla_adapter(config, control_service_key)
-        control_server = start_interaction_server(config, audit, ControlExecutor(adapter, audit))
+        control_server = start_interaction_server(
+            config, audit, ControlExecutor(adapter, audit), SlackCommandExecutor(config, monitor_once, scan_flow)
+        )
         print("Slack flow control interaction server started")
     interval = int(config.get("monitoring", {}).get("poll_interval_seconds", 300))
     if BackgroundScheduler is None:

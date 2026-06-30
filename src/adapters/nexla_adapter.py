@@ -71,6 +71,24 @@ def _first_list(value: Any, *keys: str) -> list[Any]:
     return []
 
 
+def _run_summary_rows(value: Any) -> list[dict[str, Any]] | None:
+    if isinstance(value, list):
+        rows = value
+    elif isinstance(value, dict):
+        rows = _first_list(value, "run_summary", "runSummary", "summary", "data", "items", "runs", "metrics")
+        if not rows:
+            rows = [row for row in value.values() if isinstance(row, dict)]
+        if len(rows) == 1 and isinstance(rows[0], dict):
+            nested = _run_summary_rows(rows[0])
+            if nested:
+                rows = nested
+    else:
+        rows = []
+    if not rows:
+        return None
+    return [row for row in rows if isinstance(row, dict)]
+
+
 class NexlaAdapter:
     def __init__(self, service_key: str, api_url: str | None = None) -> None:
         if NexlaClient is None:
@@ -134,6 +152,14 @@ class NexlaAdapter:
     def get_flow_health(self, flow_id: int) -> dict[str, Any] | None:
         try:
             value = _plain(self._client.flows.get_flow_health(flow_id))
+            rows = _first_list(value, "data", "items", "flows", "results")
+            if rows:
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    row_flow_id = row.get("origin_node_id") or row.get("flow_id") or row.get("id")
+                    if row_flow_id is None or int(row_flow_id) == int(flow_id):
+                        return row
             return value if isinstance(value, dict) else None
         except Exception as exc:
             logger.debug("Failed to get flow health for %s: %s", flow_id, exc)
@@ -149,7 +175,8 @@ class NexlaAdapter:
 
     def get_flow_error_logs(self, flow_id: int, run_id: Any, limit: int = 5) -> list[dict[str, Any]] | None:
         try:
-            value = _plain(self._client.flows.search_flow_logs(flow_id, run_ids=[run_id], severity="ERROR", size=limit))
+            run_ids = list(run_id) if isinstance(run_id, (list, tuple, set)) else [run_id]
+            value = _plain(self._client.flows.search_flow_logs(flow_id, run_ids=run_ids, severity="ERROR", size=limit))
             rows = _first_list(value, "logs", "items", "data")
             return [row for row in rows[:limit] if isinstance(row, dict)]
         except Exception as exc:
@@ -168,7 +195,14 @@ class NexlaAdapter:
             logger.debug("Skipping run metrics for flow %s; resource type/id unavailable", flow_id)
             return None
         try:
-            value = _plain(self._client.metrics.get_resource_metrics_by_run(metrics_resource_type, resource_id, size=25))
+            try:
+                value = _plain(
+                    self._client.metrics.get_resource_metrics_by_run(
+                        metrics_resource_type, resource_id, groupby="runId", orderby="runId", size=25
+                    )
+                )
+            except TypeError:
+                value = _plain(self._client.metrics.get_resource_metrics_by_run(metrics_resource_type, resource_id, size=25))
             rows = value if isinstance(value, list) else _first_list(value, "data", "items", "runs", "metrics")
             expected_run_id = str(run_id) if run_id is not None else None
             if rows:
@@ -178,6 +212,13 @@ class NexlaAdapter:
                     row_run_id = row.get("runId") or row.get("run_id") or row.get("runid")
                     if expected_run_id is not None and str(row_run_id) == expected_run_id:
                         return row
+                logger.info(
+                    "Run metrics did not include requested run resource=%s/%s requested_run=%s available_runs=%s",
+                    metrics_resource_type,
+                    resource_id,
+                    expected_run_id,
+                    [str(row.get("runId") or row.get("run_id") or row.get("runid")) for row in rows[:5] if isinstance(row, dict)],
+                )
                 # No row matched the requested run: return None rather than a wrong run's
                 # numbers. The enricher falls back to the flow health record's
                 # latestRecordCount/latestErrorCount, so counts are not lost.
@@ -186,6 +227,59 @@ class NexlaAdapter:
         except Exception as exc:
             logger.debug("Failed to get run metrics for %s/%s: %s", metrics_resource_type, resource_id, exc)
             return None
+
+    def get_run_summary(
+        self,
+        flow_id: int,
+        resource_type: str | None = None,
+        resource_id: int | None = None,
+        run_id: Any | None = None,
+    ) -> list[dict[str, Any]] | None:
+        metrics_resource_type = _resource_type_for_metrics(resource_type)
+        if metrics_resource_type is None or resource_id is None:
+            logger.debug("Skipping run summary for flow %s; resource type/id unavailable", flow_id)
+            return None
+        metrics = getattr(self._client, "metrics", None)
+        if metrics is None:
+            return None
+        candidates = (
+            "get_resource_run_summary",
+            "get_resource_metrics_run_summary",
+        )
+        for name in candidates:
+            try:
+                method = getattr(metrics, name, None)
+            except Exception as exc:
+                logger.debug("Run summary SDK method %s unavailable: %s", name, exc)
+                continue
+            if not callable(method):
+                continue
+            try:
+                value = _plain(method(metrics_resource_type, resource_id, size=25))
+                return _run_summary_rows(value)
+            except TypeError:
+                try:
+                    value = _plain(method(metrics_resource_type, resource_id))
+                    return _run_summary_rows(value)
+                except Exception as exc:
+                    logger.debug("Failed to get run summary via %s for %s/%s: %s", name, metrics_resource_type, resource_id, exc)
+            except Exception as exc:
+                logger.debug("Failed to get run summary via %s for %s/%s: %s", name, metrics_resource_type, resource_id, exc)
+        try:
+            method = getattr(metrics, "get_resource_metrics_by_run", None)
+        except Exception as exc:
+            logger.debug("Run summary SDK method get_resource_metrics_by_run unavailable: %s", exc)
+            method = None
+        if callable(method):
+            try:
+                try:
+                    value = _plain(method(metrics_resource_type, resource_id, groupby="runId", orderby="runId", size=25))
+                except TypeError:
+                    value = _plain(method(metrics_resource_type, resource_id, size=25))
+                return _run_summary_rows(value)
+            except Exception as exc:
+                logger.debug("Failed to get run summary via get_resource_metrics_by_run for %s/%s: %s", metrics_resource_type, resource_id, exc)
+        return None
 
     def list_unhealthy_flows(self, health_status: str = "RED") -> list[dict[str, Any]]:
         try:

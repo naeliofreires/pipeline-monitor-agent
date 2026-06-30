@@ -70,7 +70,7 @@ Implemented now:
 - `uncertain` LLM risk is normalized to `high`
 - Alert formatting with Risk Classification, plain-language explanation, and Recommended Action
 - Full Explicit Failure loop wired in `monitor_once()`: fetch unread notifications → detect anomalies → classify → send Alert via configured sender → mark read
-- Enrichment before classification with flow health, latest run status, metrics, and top error logs
+- Enrichment before classification with flow health, latest run status, per-run metrics, optional run-summary trends, and ERROR log checks across the latest/recent runs
 - Org health sweep for RED flows, deduped against notification anomalies
 - Repositories layer with SQLite Suppression Window (`repositories/suppression_repository.py`)
 - Suppression module: per-`(flow_id, anomaly_type)` window and `config.yaml` Blocklist, checked before enrichment and the LLM call
@@ -170,8 +170,8 @@ This is the target data flow. The current code implements it end-to-end: the Exp
 3. **Volume and health layers** — reads per-flow record volume for today's and yesterday's UTC date windows via `flows.get_org_health_flows(from_date, to_date)` and flags flows whose volume dropped at least `detection.volume_threshold_pct` (default 40%); also fetches RED flows via Nexla org health and creates a `health_sweep` Anomaly only when there is no already-processed Nexla notification for that Flow
 4. **Dedup check** — for Explicit Failures: checks if the notification is already marked as `read`; for Silent Failures and `health_sweep`: checks SQLite for an existing alert record for `(flow_id, anomaly_type)` within the Suppression Window
 5. **Blocklist check** — drops any problem from flows listed in `config.yaml`
-6. **Enrichment** — gathers Evidence for each Anomaly: flow health, latest run status, record/error counts, and top error logs
-7. **LLM call** — for each new problem, sends the Anomaly plus Evidence and gets back `risk_classification`, `explanation`, `recommended_action`
+6. **Enrichment** — gathers Evidence for each Anomaly: flow health, latest run status, record/error counts, optional run-summary trends, and ERROR log check results for the latest/recent runs
+7. **LLM call** — for each new problem, sends the Anomaly plus Evidence and gets back `risk_classification`, `explanation`, `recommended_action`; the explanation must state whether latest/recent Flow run logs were checked, what Nexla ERROR log Anomalies were found, whether none were found, or whether the log check was inconclusive
 8. **Alert** — builds the message and prints it to the console during development
 9. **State update** — marks the Nexla notification as `read`; saves a record to SQLite with `suppressed_until = now + suppression_window`
 

@@ -1,0 +1,993 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark light" />
+  <title>Flow Monitor — Presentation</title>
+  <style>
+    :root {
+      --bg: #07111f;
+      --bg-2: #0b1628;
+      --panel: rgba(10, 20, 36, 0.72);
+      --panel-strong: rgba(14, 28, 49, 0.88);
+      --line: rgba(160, 183, 222, 0.18);
+      --text: #eef4ff;
+      --muted: #a8b9d8;
+      --muted-2: #7f92b4;
+      --accent: #7cf1d4;
+      --accent-2: #8aa8ff;
+      --accent-3: #f7b955;
+      --danger: #ff7c8a;
+      --ok: #7df0a8;
+      --shadow: 0 30px 80px rgba(0, 0, 0, 0.35);
+      --radius-xl: 30px;
+      --radius-lg: 22px;
+      --radius-md: 16px;
+      --max: 1180px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 15% 10%, rgba(122, 241, 212, 0.18), transparent 26%),
+        radial-gradient(circle at 85% 18%, rgba(138, 168, 255, 0.16), transparent 28%),
+        radial-gradient(circle at 60% 95%, rgba(247, 185, 85, 0.11), transparent 30%),
+        linear-gradient(180deg, #050b14 0%, var(--bg) 35%, #091425 100%);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image: linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+                        linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+      background-size: 72px 72px;
+      mask-image: linear-gradient(180deg, rgba(0,0,0,0.55), transparent 80%);
+      opacity: 0.18;
+    }
+
+    a { color: inherit; text-decoration: none; }
+
+    .wrap { width: min(var(--max), calc(100% - 40px)); margin: 0 auto; }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      backdrop-filter: blur(18px);
+      background: rgba(4, 9, 18, 0.54);
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    .topbar-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 0;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: max-content;
+    }
+    .mark {
+      width: 42px;
+      height: 42px;
+      border-radius: 14px;
+      background: linear-gradient(145deg, rgba(124, 241, 212, 0.95), rgba(138, 168, 255, 0.9));
+      box-shadow: 0 12px 32px rgba(124, 241, 212, 0.25);
+      position: relative;
+    }
+    .mark::after {
+      content: "";
+      position: absolute;
+      inset: 11px;
+      border-radius: 10px;
+      background: rgba(5, 11, 20, 0.88);
+      transform: rotate(10deg);
+    }
+    .brand strong { display: block; letter-spacing: 0.02em; }
+    .brand small { display: block; color: var(--muted); margin-top: 2px; }
+
+    .nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    .nav a {
+      font-size: 0.92rem;
+      color: var(--muted);
+      border: 1px solid transparent;
+      border-radius: 999px;
+      padding: 8px 12px;
+      transition: 180ms ease;
+    }
+    .nav a:hover,
+    .nav a.active {
+      color: var(--text);
+      background: rgba(255,255,255,0.05);
+      border-color: rgba(255,255,255,0.08);
+    }
+
+    .hero {
+      padding: 72px 0 34px;
+      position: relative;
+      isolation: isolate;
+    }
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.25fr 0.75fr;
+      gap: 24px;
+      align-items: stretch;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(124, 241, 212, 0.11);
+      color: #bffff0;
+      border: 1px solid rgba(124, 241, 212, 0.18);
+      font-size: 0.9rem;
+      letter-spacing: 0.02em;
+    }
+    .eyebrow::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 6px rgba(124, 241, 212, 0.12);
+    }
+
+    h1, h2, h3 {
+      font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+      letter-spacing: -0.02em;
+      margin: 0;
+    }
+    h1 {
+      font-size: clamp(3rem, 7vw, 5.7rem);
+      line-height: 0.95;
+      margin-top: 18px;
+      max-width: 11ch;
+    }
+    .lede {
+      margin: 18px 0 0;
+      font-size: clamp(1.06rem, 1.8vw, 1.25rem);
+      line-height: 1.7;
+      color: var(--muted);
+      max-width: 60ch;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 30px;
+    }
+    .btn {
+      border-radius: 999px;
+      padding: 12px 16px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      transition: transform 180ms ease, background 180ms ease, border-color 180ms ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .btn.primary {
+      background: linear-gradient(135deg, rgba(124,241,212,0.18), rgba(138,168,255,0.18));
+      border-color: rgba(124,241,212,0.28);
+    }
+    .btn:hover { transform: translateY(-1px); border-color: rgba(255,255,255,0.22); }
+
+    .hero-panel,
+    .card,
+    .callout,
+    .table-shell,
+    .timeline-item,
+    .metric {
+      background: linear-gradient(180deg, rgba(16, 28, 47, 0.85), rgba(9, 16, 29, 0.82));
+      border: 1px solid rgba(164, 188, 228, 0.12);
+      box-shadow: var(--shadow);
+    }
+
+    .hero-panel {
+      border-radius: var(--radius-xl);
+      padding: 22px;
+      position: relative;
+      overflow: hidden;
+    }
+    .hero-panel::before {
+      content: "";
+      position: absolute;
+      inset: -30% -10% auto auto;
+      width: 180px;
+      height: 180px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(124,241,212,0.2), transparent 70%);
+      filter: blur(18px);
+    }
+    .hero-mini {
+      display: grid;
+      gap: 14px;
+    }
+    .metric {
+      border-radius: 22px;
+      padding: 16px 18px;
+      display: grid;
+      gap: 8px;
+    }
+    .metric span { color: var(--muted); font-size: 0.92rem; }
+    .metric strong { font-size: 1.3rem; }
+    .metric p { margin: 0; color: var(--muted); line-height: 1.5; }
+
+    .section {
+      padding: 36px 0;
+      position: relative;
+    }
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    .section-head p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 62ch;
+      line-height: 1.7;
+    }
+    h2 { font-size: clamp(2rem, 4vw, 3rem); }
+
+    .agenda-grid,
+    .cards,
+    .three-up,
+    .demo-grid {
+      display: grid;
+      gap: 16px;
+    }
+    .agenda-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .three-up { grid-template-columns: 1.05fr 0.95fr; }
+    .demo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+    .card {
+      border-radius: var(--radius-lg);
+      padding: 18px;
+      position: relative;
+      overflow: hidden;
+    }
+    .card .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.84rem;
+      color: #d7f7ef;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(124, 241, 212, 0.08);
+      border: 1px solid rgba(124, 241, 212, 0.16);
+      margin-bottom: 14px;
+    }
+    .card h3 { font-size: 1.28rem; margin-bottom: 10px; }
+    .card p, li { color: var(--muted); line-height: 1.65; }
+    .card ul { margin: 12px 0 0; padding-left: 18px; }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 12px;
+      position: relative;
+    }
+    .timeline::before {
+      content: "";
+      position: absolute;
+      left: 3%; right: 3%; top: 38px;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.18), transparent);
+    }
+    .timeline-item {
+      border-radius: 20px;
+      padding: 16px;
+      min-height: 190px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      position: relative;
+    }
+    .step {
+      width: 40px; height: 40px;
+      border-radius: 13px;
+      display: grid; place-items: center;
+      background: linear-gradient(135deg, rgba(124,241,212,0.9), rgba(138,168,255,0.85));
+      color: #04101c;
+      font-weight: 800;
+      box-shadow: 0 12px 24px rgba(124,241,212,0.16);
+    }
+    .timeline-item h3 { font-size: 1.08rem; }
+    .timeline-item p { margin: 0; font-size: 0.96rem; }
+
+    .pill-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+    .pill {
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 999px;
+      padding: 8px 12px;
+      color: var(--text);
+      background: rgba(255,255,255,0.04);
+      font-size: 0.9rem;
+    }
+
+    .table-shell { border-radius: var(--radius-xl); overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td {
+      text-align: left;
+      padding: 16px 18px;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+      vertical-align: top;
+    }
+    th {
+      color: #dce7ff;
+      font-size: 0.9rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      background: rgba(255,255,255,0.03);
+    }
+    td { color: var(--muted); }
+    tr:last-child td { border-bottom: none; }
+
+    .callout {
+      border-radius: var(--radius-lg);
+      padding: 18px 20px;
+    }
+    .callout strong { display: block; margin-bottom: 6px; }
+    .callout p { margin: 0; color: var(--muted); line-height: 1.65; }
+    .callout.ok { border-color: rgba(125,240,168,0.22); }
+    .callout.warn { border-color: rgba(247,185,85,0.24); }
+
+    .matrix {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .matrix .card { min-height: 100%; }
+    .matrix .badge {
+      display: inline-flex;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      margin-bottom: 12px;
+      width: fit-content;
+      border: 1px solid rgba(255,255,255,0.12);
+    }
+    .badge.low { background: rgba(125,240,168,0.1); color: #c8ffe0; }
+    .badge.high { background: rgba(255,124,138,0.11); color: #ffd3d9; }
+    .badge.uncertain { background: rgba(247,185,85,0.11); color: #ffe6b7; }
+
+    .talking-points {
+      display: grid;
+      gap: 12px;
+    }
+    .point {
+      display: grid;
+      grid-template-columns: 30px 1fr;
+      gap: 12px;
+      align-items: start;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .point b {
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 10px;
+      background: rgba(124,241,212,0.14);
+      color: #d6fff5;
+      font-size: 0.88rem;
+    }
+    .point p { margin: 0; color: var(--muted); line-height: 1.6; }
+
+    .footer {
+      padding: 28px 0 56px;
+      color: var(--muted-2);
+      font-size: 0.95rem;
+    }
+
+    /* ---- Mode diagrams ---- */
+    .mode-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      align-items: start;
+    }
+    .mode-diagram {
+      border-radius: var(--radius-lg);
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      background: linear-gradient(180deg, rgba(16, 28, 47, 0.85), rgba(9, 16, 29, 0.82));
+      border: 1px solid rgba(164, 188, 228, 0.12);
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+    .mode-diagram .mode-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .mode-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 11px;
+      display: grid;
+      place-items: center;
+      font-size: 1.1rem;
+      background: linear-gradient(135deg, rgba(124,241,212,0.92), rgba(138,168,255,0.85));
+      color: #04101c;
+      flex: 0 0 auto;
+      box-shadow: 0 10px 22px rgba(124,241,212,0.16);
+    }
+    .mode-diagram h3 { font-size: 1.12rem; }
+    .mode-diagram .mode-sub { margin: 0; color: var(--muted-2); font-size: 0.86rem; }
+    .mode-trigger {
+      align-self: flex-start;
+      font-size: 0.78rem;
+      color: #d7f7ef;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(124, 241, 212, 0.08);
+      border: 1px solid rgba(124, 241, 212, 0.16);
+      font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
+    }
+
+    .flow {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-top: 4px;
+    }
+    .flow-node {
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.10);
+      font-size: 0.92rem;
+      color: var(--text);
+      line-height: 1.4;
+    }
+    .flow-node small { display: block; color: var(--muted-2); font-size: 0.78rem; margin-top: 2px; }
+    .flow-node.accent { border-color: rgba(138,168,255,0.4); background: rgba(138,168,255,0.10); }
+    .flow-node.llm { border-color: rgba(247,185,85,0.4); background: rgba(247,185,85,0.10); }
+    .flow-node.out { border-color: rgba(125,240,168,0.34); background: rgba(125,240,168,0.10); }
+    .flow-arrow {
+      align-self: center;
+      color: var(--muted-2);
+      font-size: 1rem;
+      line-height: 1;
+      padding: 5px 0;
+    }
+    .flow-loop {
+      align-self: center;
+      margin-top: 4px;
+      font-size: 0.78rem;
+      color: var(--accent);
+      border: 1px dashed rgba(124,241,212,0.35);
+      border-radius: 999px;
+      padding: 5px 12px;
+    }
+    .flow-split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .flow-pipe {
+      border-radius: 12px;
+      padding: 10px 12px;
+      border: 1px dashed rgba(164,188,228,0.28);
+      background: rgba(255,255,255,0.02);
+      font-size: 0.82rem;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    .flow-pipe b { color: var(--text); font-weight: 600; }
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(18px);
+      transition: opacity 700ms ease, transform 700ms ease;
+    }
+    .reveal.visible { opacity: 1; transform: translateY(0); }
+
+    @media (max-width: 1040px) {
+      .hero-grid, .three-up, .demo-grid { grid-template-columns: 1fr; }
+      .agenda-grid, .cards, .matrix { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .mode-grid { grid-template-columns: 1fr; }
+      .timeline { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .timeline::before { display: none; }
+    }
+    @media (max-width: 720px) {
+      .wrap { width: min(var(--max), calc(100% - 24px)); }
+      .topbar-inner { flex-direction: column; align-items: flex-start; }
+      .nav { justify-content: flex-start; }
+      h1 { max-width: 100%; font-size: clamp(2.6rem, 15vw, 4.2rem); }
+      .agenda-grid, .cards, .matrix, .timeline, .mode-grid { grid-template-columns: 1fr; }
+      table, thead, tbody, th, td, tr { display: block; }
+      thead { display: none; }
+      tr { border-bottom: 1px solid rgba(255,255,255,0.08); }
+      td { padding: 12px 16px; }
+      td::before {
+        content: attr(data-label);
+        display: block;
+        color: #dce7ff;
+        font-size: 0.82rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-bottom: 6px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="#inicio" aria-label="Go to the top">
+        <span class="mark" aria-hidden="true"></span>
+        <span>
+          <strong>Flow Monitor</strong>
+          <small>Agent presentation</small>
+        </span>
+      </a>
+      <nav class="nav" aria-label="Presentation navigation">
+        <a href="#agenda">Plan</a>
+        <a href="#fluxo">Flow path</a>
+        <a href="#modes">Modes</a>
+        <a href="#anomalies">Anomaly</a>
+        <a href="#evidence">Evidence</a>
+        <a href="#risco">Risk</a>
+        <a href="#ruido">Noise</a>
+        <a href="#demo">Demo</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="inicio">
+    <section class="hero wrap reveal">
+      <div class="hero-grid">
+        <div>
+          <span class="eyebrow">Read-only Flow monitoring • LLM-based judgment • console/Slack output</span>
+          <h1>A clear view of what the agent sees, decides, and sends.</h1>
+          <p class="lede">
+            This page gives a simple view of the agent. It watches Nexla Flows, finds Anomaly,
+            gathers Enrichment, builds Evidence, sets Risk Classification with an LLM, and sends an Alert
+            with plain language and a Recommended Action.
+          </p>
+          <div class="hero-actions">
+            <a class="btn primary" href="#fluxo">See the flow path</a>
+            <a class="btn" href="#demo">See demo notes</a>
+          </div>
+          <div class="pill-row" aria-label="Quick summary">
+            <span class="pill">Read-only by default</span>
+            <span class="pill">Suppression Window for repeats</span>
+            <span class="pill">Blocklist for noisy Flows</span>
+            <span class="pill">Slack controls are supervised</span>
+          </div>
+        </div>
+
+        <aside class="hero-panel">
+          <div class="hero-mini">
+            <div class="metric">
+              <span>What it does</span>
+              <strong>It watches, enriches, classifies, and reports.</strong>
+              <p>The agent does not fix the Flow. It reads signals, explains what happened, and guides the operator.</p>
+            </div>
+            <div class="metric">
+              <span>System output</span>
+              <strong>Alert in console or Slack</strong>
+              <p>The default Alert Sender prints to the console. Slack is used only when it is turned on on purpose.</p>
+            </div>
+            <div class="metric">
+              <span>Safety</span>
+              <strong>Read first, control only by rule</strong>
+              <p>The monitor is read-only. Flow controls in Slack are a supervised exception from ADR 0007, with a dedicated key.</p>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="agenda" class="section wrap reveal">
+      <div class="section-head">
+        <div>
+          <h2>Plan</h2>
+          <p>A short path to keep the talk clear and easy to follow.</p>
+        </div>
+      </div>
+      <div class="agenda-grid">
+        <article class="card"><span class="tag">01</span><h3>The agent in one line</h3><p>What it watches, why it exists, and what it helps with.</p></article>
+        <article class="card"><span class="tag">02</span><h3>Flow path</h3><p>How a Flow reading becomes Enrichment, Evidence, judgment, and Alert.</p></article>
+        <article class="card"><span class="tag">03</span><h3>Anomaly types</h3><p>Explicit Failure, Silent Failure, and health_sweep, with simple examples.</p></article>
+        <article class="card"><span class="tag">04</span><h3>Risk and LLM</h3><p>How the model supports Risk Classification and how to read uncertain.</p></article>
+        <article class="card"><span class="tag">05</span><h3>Noise and safety</h3><p>Suppression Window, Blocklist, console/Slack, and read-only rules.</p></article>
+        <article class="card"><span class="tag">06</span><h3>Demo and close</h3><p>What to show, what to expect, and how to finish the talk.</p></article>
+      </div>
+    </section>
+
+    <section id="fluxo" class="section wrap reveal">
+      <div class="section-head">
+        <div>
+          <h2>The flow path</h2>
+          <p>This is the main path to explain. The read is deterministic until the classification step, and the output stays controlled.</p>
+        </div>
+      </div>
+      <div class="timeline" aria-label="Agent flow path">
+        <article class="timeline-item">
+          <div class="step">1</div>
+          <h3>Watch Flows</h3>
+          <p>The agent scans the Flows it tracks and reads health, run state, and volume signals.</p>
+        </article>
+        <article class="timeline-item">
+          <div class="step">2</div>
+          <h3>Find Anomaly</h3>
+          <p>It marks the first signal as Explicit Failure, Silent Failure, or health_sweep.</p>
+        </article>
+        <article class="timeline-item">
+          <div class="step">3</div>
+          <h3>Do Enrichment</h3>
+          <p>It gathers what is needed to understand the case: Flow state, last run, counts, and useful log lines.</p>
+        </article>
+        <article class="timeline-item">
+          <div class="step">4</div>
+          <h3>Build Evidence</h3>
+          <p>It arranges the data in a clean form so the LLM can decide with more context and less noise.</p>
+        </article>
+        <article class="timeline-item">
+          <div class="step">5</div>
+          <h3>Set Risk Classification</h3>
+          <p>The LLM returns low, high, or uncertain. If it is uncertain, it is handled as high.</p>
+        </article>
+        <article class="timeline-item">
+          <div class="step">6</div>
+          <h3>Send Alert</h3>
+          <p>The Alert includes a direct explanation and a Recommended Action, with a Suppression Window to avoid repeats.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="modes" class="section wrap reveal">
+      <div class="section-head">
+        <div>
+          <h2>The three modes</h2>
+          <p>
+            The same pipeline runs in three ways: the <strong>Scheduler</strong> runs it on a timer, a
+            <strong>Scan</strong> runs it once on demand, and <strong>Monitoring</strong> watches specific Flows on every tick.
+          </p>
+        </div>
+      </div>
+      <div class="mode-grid">
+
+        <!-- Scheduler -->
+        <article class="mode-diagram">
+          <div class="mode-head">
+            <span class="mode-icon" aria-hidden="true">⏱</span>
+            <div>
+              <h3>Scheduler</h3>
+              <p class="mode-sub">Automatic, always on</p>
+            </div>
+          </div>
+          <span class="mode-trigger">timer · every 300s</span>
+          <div class="flow">
+            <div class="flow-node accent">App starts<small>first tick runs right away</small></div>
+            <div class="flow-arrow">↓</div>
+            <div class="flow-node">monitor_once()<small>full pipeline, every tick</small></div>
+            <div class="flow-arrow">↓</div>
+            <div class="flow-node">Detect · Filter<small>blocklist + Suppression Window</small></div>
+            <div class="flow-arrow">↓</div>
+            <div class="flow-node">Enrich<small>build Evidence</small></div>
+            <div class="flow-arrow">↓</div>
+            <div class="flow-node llm">Classify (LLM)<small>low · high · uncertain→high</small></div>
+            <div class="flow-arrow">↓</div>
+            <div class="flow-node out">Alert + Suppress<small>send once, then hold repeats</small></div>
+            <div class="flow-loop">↻ repeats every interval</div>
+          </div>
+        </article>
+
+        <!-- Scan -->
+        <article class="mode-diagram">
+          <div class="mode-head">
+            <span class="mode-icon" aria-hidden="true">🔎</span>
+            <div>
+              <h3>Scan</h3>
+              <p class="mode-sub">On demand, one shot</p>
+            </div>
+          </div>
+          <span class="mode-trigger">scan [flow_id]</span>
+          <div class="flow">
+            <div class="flow-node accent">Slack command<small>runs in a background thread</small></div>
+            <div class="flow-arrow">↓</div>
+            <div class="flow-split">
+              <div class="flow-pipe"><b>scan</b><br/>full monitor_once across the org</div>
+              <div class="flow-pipe"><b>scan 42</b><br/>scan_flow() for one Flow</div>
+            </div>
+            <div class="flow-arrow">↓</div>
+            <div class="flow-node">Detect · Enrich<small>health + volume signals</small></div>
+            <div class="flow-arrow">↓</div>
+            <div class="flow-node llm">Classify (LLM)<small>risk + explanation</small></div>
+            <div class="flow-arrow">↓</div>
+            <div class="flow-node out">Report to Slack<small>informational — no Suppression</small></div>
+          </div>
+        </article>
+
+        <!-- Monitoring -->
+        <article class="mode-diagram">
+          <div class="mode-head">
+            <span class="mode-icon" aria-hidden="true">📌</span>
+            <div>
+              <h3>Monitoring</h3>
+              <p class="mode-sub">Per-Flow follow</p>
+            </div>
+          </div>
+          <span class="mode-trigger">monitoring …</span>
+          <div class="flow">
+            <div class="flow-node accent">Register a Flow<small>add · remove · list</small></div>
+            <div class="flow-arrow">↓</div>
+            <div class="flow-node">Checked every tick<small>runs with the Scheduler</small></div>
+            <div class="flow-arrow">↓</div>
+            <div class="flow-node">New run? Volume vs. baseline<small>average of last 5 runs</small></div>
+            <div class="flow-arrow">↓</div>
+            <div class="flow-node llm">Classify if anomaly (LLM)<small>only when something looks off</small></div>
+            <div class="flow-arrow">↓</div>
+            <div class="flow-node out">Run report to channel<small>every new run, plus risk if high</small></div>
+            <div class="flow-loop">↻ on each Scheduler tick</div>
+          </div>
+        </article>
+
+      </div>
+      <div class="callout" style="margin-top:16px;">
+        <strong>One pipeline, three entry points</strong>
+        <p>
+          Detect → Enrich → Classify → Alert is shared. The Scheduler and Monitoring run it on the timer;
+          a Scan triggers it by hand. Only the Scheduler suppresses repeats — Scan and Monitoring are meant to report.
+        </p>
+      </div>
+    </section>
+
+    <section id="anomalies" class="section wrap reveal">
+      <div class="section-head">
+        <div>
+          <h2>Types of Anomaly</h2>
+          <p>A simple table helps in the talk. Each type starts from a different signal and needs a different focus.</p>
+        </div>
+      </div>
+      <div class="table-shell">
+        <table>
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th>How it shows up</th>
+              <th>What it means</th>
+              <th>How to explain it</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td data-label="Type"><strong>Explicit Failure</strong></td>
+              <td data-label="How it shows up">Nexla already reported it, and the agent already handled that signal.</td>
+              <td data-label="What it means">The Flow got a clear failure signal.</td>
+              <td data-label="How to explain it">"The system said it clearly. The agent organizes it, adds Enrichment, and points the way."</td>
+            </tr>
+            <tr>
+              <td data-label="Type"><strong>Silent Failure</strong></td>
+              <td data-label="How it shows up">The Flow runs, but it processes 40% or more fewer records than at the same time yesterday.</td>
+              <td data-label="What it means">Volume is lower, but there is no clear message from Nexla.</td>
+              <td data-label="How to explain it">"Nothing looks broken at first, but the output dropped too much."</td>
+            </tr>
+            <tr>
+              <td data-label="Type"><strong>health_sweep</strong></td>
+              <td data-label="How it shows up">The org health sweep finds a Flow in RED with no signal already handled.</td>
+              <td data-label="What it means">A bad state was found that was not covered before.</td>
+              <td data-label="How to explain it">"It is a safety sweep so a red Flow does not get missed."</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="cards" style="margin-top:16px;">
+        <article class="card"><span class="tag">Practical read</span><h3>Explicit Failure</h3><p>It often gives enough detail to start the talk, but it still goes through the same Enrichment and Evidence path.</p></article>
+        <article class="card"><span class="tag">Volume</span><h3>Silent Failure</h3><p>This is the most useful read when the Flow looks normal but the output dropped hard.</p></article>
+        <article class="card"><span class="tag">Coverage</span><h3>health_sweep</h3><p>It closes gaps: if the Flow is RED and no signal is already handled, the agent speaks up.</p></article>
+      </div>
+    </section>
+
+    <section id="evidence" class="section wrap reveal">
+      <div class="section-head">
+        <div>
+          <h2>Enrichment and Evidence</h2>
+          <p>This step is good to show because it separates “spot something” from “know enough to decide.”</p>
+        </div>
+      </div>
+      <div class="three-up">
+        <div class="callout ok">
+          <strong>Enrichment</strong>
+          <p>
+            It collects the signals that give shape to the Anomaly: Flow health, last run, record count,
+            count of bad lines, and useful log lines. The goal is less guesswork.
+          </p>
+        </div>
+        <div class="callout warn">
+          <strong>Evidence</strong>
+          <p>
+            This is the final packet for the LLM: organized data, clear facts, and easy comparisons.
+            Better Evidence leads to better Risk Classification and a better Recommended Action.
+          </p>
+        </div>
+      </div>
+      <div class="pill-row" style="margin-top:16px;">
+        <span class="pill">Flow health</span>
+        <span class="pill">last run</span>
+        <span class="pill">record count</span>
+        <span class="pill">count of bad lines</span>
+        <span class="pill">log lines</span>
+      </div>
+    </section>
+
+    <section id="risco" class="section wrap reveal">
+      <div class="section-head">
+        <div>
+          <h2>Risk Classification via LLM</h2>
+          <p>The LLM does not replace the signals. It judges how much attention the case needs and returns a simple answer.</p>
+        </div>
+      </div>
+      <div class="matrix">
+        <article class="card">
+          <span class="badge low">low</span>
+          <h3>Low</h3>
+          <p>The signal is clear, there is enough Evidence, and the case looks contained. The Alert can stay short and direct.</p>
+        </article>
+        <article class="card">
+          <span class="badge uncertain">uncertain</span>
+          <h3>Gray zone</h3>
+          <p>If the answer is not clear, it is handled as high. This avoids undercalling a Flow that needs human review.</p>
+        </article>
+        <article class="card">
+          <span class="badge high">high</span>
+          <h3>High</h3>
+          <p>There are strong signs of impact or volume loss. The message must be direct and the Recommended Action must be clear.</p>
+        </article>
+      </div>
+      <div class="callout" style="margin-top:16px;">
+        <strong>How to say it in the talk</strong>
+        <p>
+          “The deterministic part finds the Anomaly. The LLM helps read the Evidence and pick what the operator should check first.”
+        </p>
+      </div>
+    </section>
+
+    <section id="ruido" class="section wrap reveal">
+      <div class="section-head">
+        <div>
+          <h2>Noise control and delivery</h2>
+          <p>It is worth saying that the agent tries to be useful without sending the same Alert again and again.</p>
+        </div>
+      </div>
+      <div class="demo-grid">
+        <div class="card">
+          <span class="tag">Suppression Window</span>
+          <h3>Keeps repeats out</h3>
+          <p>By default, the agent does not send another Alert for the same Flow and the same Anomaly type during the set window.</p>
+        </div>
+        <div class="card">
+          <span class="tag">Blocklist</span>
+          <h3>Stops chronic noise</h3>
+          <p>Noisy Flows can go on the Blocklist so they do not burn attention with too many messages.</p>
+        </div>
+        <div class="card">
+          <span class="tag">Alert Sender</span>
+          <h3>Console or Slack</h3>
+          <p>The default sender writes to the console. The Slack sender is for supervised use and does not change the read-only nature of the monitor.</p>
+        </div>
+        <div class="card">
+          <span class="tag">ADR 0007 exception</span>
+          <h3>Supervised Slack controls</h3>
+          <p>Flow controls in Slack are an explicit exception, with a dedicated key and supervision. This is not the normal path.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="demo" class="section wrap reveal">
+      <div class="section-head">
+        <div>
+          <h2>Demo and talking points</h2>
+          <p>Use this section as a short talk track. It works well when you move between the page and a terminal/log view.</p>
+        </div>
+      </div>
+      <div class="demo-grid">
+        <div class="talking-points">
+          <div class="point"><b>1</b><p><strong>Start with the goal:</strong> “This agent watches Nexla Flows and turns weak signals into a useful Alert.”</p></div>
+          <div class="point"><b>2</b><p><strong>Show the path:</strong> read → Anomaly → Enrichment → Evidence → Risk Classification → Alert.</p></div>
+          <div class="point"><b>3</b><p><strong>Explain the cases:</strong> Explicit Failure, Silent Failure, and health_sweep start in different ways, but they follow the same path.</p></div>
+        </div>
+        <div class="talking-points">
+          <div class="point"><b>4</b><p><strong>Talk about safety:</strong> the monitor is read-only; Slack controls are supervised and not the default.</p></div>
+          <div class="point"><b>5</b><p><strong>Talk about noise:</strong> Suppression Window and Blocklist help avoid repeats and operator fatigue.</p></div>
+          <div class="point"><b>6</b><p><strong>Close with value:</strong> less noise, clearer reads, faster human response, and better focus on what matters.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section wrap reveal" aria-labelledby="conclusao">
+      <div class="section-head">
+        <div>
+          <h2 id="conclusao">Close</h2>
+          <p>If people remember one thing, let it be this: the agent does not try to do everything. It tries to make each Flow easy to read, trust, and act on.</p>
+        </div>
+      </div>
+      <div class="callout ok">
+        <strong>Final note</strong>
+        <p>
+          The agent combines deterministic reads, well-chosen Enrichment, and an LLM to set Risk Classification with more context.
+          The result is a clear Alert with controlled noise and safe output.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer wrap">
+    Static page for the Flow Monitor presentation.
+  </footer>
+
+  <script>
+    const links = [...document.querySelectorAll('.nav a')];
+    const sections = [...document.querySelectorAll('main section[id]')];
+
+    links.forEach((link) => {
+      link.addEventListener('click', (e) => {
+        const id = link.getAttribute('href');
+        const el = document.querySelector(id);
+        if (el) {
+          e.preventDefault();
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      });
+    });
+
+    const navObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          const id = `#${entry.target.id}`;
+          links.forEach((l) => l.classList.toggle('active', l.getAttribute('href') === id));
+        }
+      });
+    }, { rootMargin: '-40% 0px -50% 0px', threshold: 0.15 });
+
+    sections.forEach((s) => navObserver.observe(s));
+
+    const revealObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) entry.target.classList.add('visible');
+      });
+    }, { threshold: 0.12 });
+
+    document.querySelectorAll('.reveal').forEach((el) => revealObserver.observe(el));
+  </script>
+</body>
+</html>

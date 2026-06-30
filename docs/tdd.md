@@ -74,7 +74,7 @@ Implemented now:
 - Org health sweep for RED flows, deduped against notification anomalies
 - Repositories layer with SQLite Suppression Window (`repositories/suppression_repository.py`)
 - Suppression module: per-`(flow_id, anomaly_type)` window and `config.yaml` Blocklist, checked before enrichment and the LLM call
-- Silent Failure detection: day-over-day per-flow volume comparison (`modules/detection/silent_failure.py`), org-health volume read (`adapters/nexla_adapter.py::list_flow_volumes`), and the metric-snapshot repository (`repositories/snapshot_repository.py`)
+- Silent Failure detection: run-over-run per-flow volume comparison (`modules/detection/silent_failure.py`), no-window org-health volume read (`adapters/nexla_adapter.py::list_flow_volumes`), and the metric-snapshot repository (`repositories/snapshot_repository.py`); see ADR-0005 Update for why day-over-day windowing was replaced
 - Per-flow volume threshold overrides and `min_baseline_records` guard in `config.yaml`
 - Redaction of credentials / connection strings in error text before the Alert and the LLM payload (`modules/redaction.py`)
 - Unit tests and feature validation for the Explicit Failure alert path, alert sender seam, Slack smoke path, Suppression Window / Blocklist, Silent Failure detection, and redaction
@@ -83,7 +83,7 @@ Not implemented yet:
 
 - Docker Compose end-to-end run with real Nexla and opencode.ai credentials
 - Controlled real-alert monitor tick with Slack enabled
-- Intra-day (hourly) volume windows and a rolling multi-day baseline (v1 uses day-over-day)
+- Intra-day (hourly) volume windows and a rolling multi-day baseline (v1 uses run-over-run)
 - Broader test coverage beyond the alert, suppression, and Silent Failure paths
 
 ### ✅ In Scope (v1 — after demo)
@@ -163,7 +163,7 @@ A Python service running inside a Docker container. It checks for problems every
 
 ### Data Flow
 
-This is the target data flow. The current code implements it end-to-end: the Explicit Failure path, the org health sweep, Silent Failure detection by day-over-day volume comparison (step 3), the SQLite Suppression Window and Blocklist filtering (steps 4–5), enrichment, classification, and Alert delivery through the console/Slack sender seam.
+This is the target data flow. The current code implements it end-to-end: the Explicit Failure path, the org health sweep, Silent Failure detection by run-over-run volume comparison (step 3), the SQLite Suppression Window and Blocklist filtering (steps 4–5), enrichment, classification, and Alert delivery through the console/Slack sender seam.
 
 1. **APScheduler** runs the loop every 300 seconds
 2. **Primary layer** — fetches unread notifications from the last hour via `client.notifications.list(read=0, from_timestamp=...)`; each one is a possible Explicit Failure
@@ -197,7 +197,7 @@ pipeline-monitor/
 │   │   ├── detection/
 │   │   │   ├── explicit_failure.py      # logic to identify Explicit Failures
 │   │   │   ├── health_sweep.py          # RED org-health flow sweep
-│   │   │   └── silent_failure.py        # day-over-day volume-drop detection
+│   │   │   └── silent_failure.py        # run-over-run volume-drop detection
 │   │   ├── enrichment/
 │   │   │   └── enricher.py              # Evidence orchestration before classification
 │   │   ├── suppression/

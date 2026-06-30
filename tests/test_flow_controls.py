@@ -16,6 +16,7 @@ from modules.controls.policy import ControlMetadata, ParsedAction, authorize, bu
 from modules.controls.server import start_interaction_server
 from modules.controls.signature import verify_slack_signature
 from repositories.control_audit_repository import ControlAuditRepository
+from repositories.monitored_flow_repository import MonitoredFlowRepository
 from monitor import build_flow_scan_text
 
 
@@ -236,6 +237,44 @@ class FlowControlTests(unittest.TestCase):
         executor = SlackCommandExecutor({}, lambda config: None, lambda config, flow_id: "done")
         self.assertIn("Invalid Flow ID", executor.handle({"text": ["scan abc"], "response_url": ["https://slack.response"]}))
 
+    def test_slack_command_executor_handles_monitoring_register_remove_and_list(self):
+        calls = []
+        def monitoring(config, action, flow_id, metadata):
+            calls.append((config, action, flow_id, metadata["channel_id"], metadata["user_id"]))
+            return f"{action} ok"
+
+        executor = SlackCommandExecutor({"x": 1}, lambda config: None, None, monitoring)
+        form = {"channel_id": ["C1"], "user_id": ["U1"], "team_id": ["T1"]}
+        self.assertEqual(executor.handle({**form, "text": ["monitoring 42"]}), "register ok")
+        self.assertEqual(executor.handle({**form, "text": ["monitoring remove 42"]}), "remove ok")
+        self.assertEqual(executor.handle({**form, "text": ["monitoring list"]}), "list ok")
+        self.assertEqual(
+            calls,
+            [
+                ({"x": 1}, "register", 42, "C1", "U1"),
+                ({"x": 1}, "remove", 42, "C1", "U1"),
+                ({"x": 1}, "list", None, "C1", "U1"),
+            ],
+        )
+
+    def test_monitored_flow_repository_registers_lists_removes_and_tracks_runs(self):
+        from datetime import datetime, timezone
+
+        repo = MonitoredFlowRepository(":memory:")
+        self.addCleanup(repo.close)
+        now = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+        repo.register_flow(42, "C1", "U1", now)
+        self.assertEqual([flow.flow_id for flow in repo.list_flows("C1")], [42])
+        repo.save_run_snapshot(42, "r1", 100, 0, "SUCCESS", now)
+        repo.save_run_snapshot(42, "r2", 200, 1, "SUCCESS", now)
+        recent = repo.recent_run_snapshots(42, exclude_run_id="r2", limit=5)
+        self.assertEqual([(row.run_id, row.records) for row in recent], [("r1", 100)])
+        repo.mark_checked(42, "C1", now, last_seen_run_id="r2", last_alerted_run_id="r2")
+        flow = repo.list_flows("C1")[0]
+        self.assertEqual((flow.last_seen_run_id, flow.last_alerted_run_id), ("r2", "r2"))
+        self.assertTrue(repo.remove_flow(42, "C1"))
+        self.assertEqual(repo.list_flows("C1"), [])
+
     def test_slack_command_executor_runs_targeted_scan(self):
         calls = []
         requests = []
@@ -253,6 +292,53 @@ class FlowControlTests(unittest.TestCase):
         self.assertIn("targeted scan", response)
         self.assertEqual(calls, [({"x": 1}, 42)])
         self.assertIn("targeted analysis", json.loads(requests[0].data.decode())["text"])
+
+    def test_targeted_flow_health_status_followup_includes_flow_buttons(self):
+        requests = []
+        class ImmediateThread:
+            def __init__(self, target, args=(), daemon=None): self.target = target; self.args = args
+            def start(self): self.target(*self.args)
+        class Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        def flow_scan(config, flow_id):
+            return "*🚦 Flow Health Status | ID: 42 [LOW]*\n```\nStatus     : ACTIVE\n```"
+
+        config = {
+            "slack": {"signing_secret": "secret", "flow_url_template": "https://nexla.test/flows/{flow_id}"},
+            "controls": {"enabled": True, "allowed_actions": ["pause"], "protected_flows": []},
+        }
+        with patch("modules.controls.commands.threading.Thread", ImmediateThread), patch("modules.controls.commands.urllib.request.urlopen", lambda req, timeout=3: requests.append(req) or Resp()):
+            SlackCommandExecutor(config, lambda config: None, flow_scan).handle({"text": ["scan 42"], "response_url": ["https://slack.response"]})
+
+        payload = json.loads(requests[0].data.decode())
+        self.assertIn("blocks", payload)
+        buttons = payload["blocks"][1]["elements"]
+        self.assertEqual([button["text"]["text"] for button in buttons], ["Open Flow", "Pause"])
+        self.assertEqual(buttons[0]["url"], "https://nexla.test/flows/42")
+        self.assertEqual(parse_action_value(buttons[1]["value"], 900, signing_secret="secret").flow_id, 42)
+
+    def test_targeted_flow_health_status_buttons_fallback_to_health_when_status_unknown(self):
+        requests = []
+        class ImmediateThread:
+            def __init__(self, target, args=(), daemon=None): self.target = target; self.args = args
+            def start(self): self.target(*self.args)
+        class Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        def flow_scan(config, flow_id):
+            return "*🚦 Flow Health Status | ID: 42 [LOW]*\n```\nHealth     : GREEN\nStatus     : unknown\n```"
+
+        config = {
+            "slack": {"signing_secret": "secret"},
+            "controls": {"enabled": True, "allowed_actions": ["pause"], "protected_flows": []},
+        }
+        with patch("modules.controls.commands.threading.Thread", ImmediateThread), patch("modules.controls.commands.urllib.request.urlopen", lambda req, timeout=3: requests.append(req) or Resp()):
+            SlackCommandExecutor(config, lambda config: None, flow_scan).handle({"text": ["scan 42"], "response_url": ["https://slack.response"]})
+
+        buttons = json.loads(requests[0].data.decode())["blocks"][1]["elements"]
+        self.assertEqual(buttons[0]["text"]["text"], "Pause")
+        self.assertEqual(parse_action_value(buttons[0]["value"], 900, signing_secret="secret").flow_id, 42)
 
     def test_slack_command_executor_targeted_scan_failure_posts_followup(self):
         requests = []
@@ -277,6 +363,16 @@ class FlowControlTests(unittest.TestCase):
         )
         self.assertIn("No Anomaly found", text)
         self.assertNotIn("Anomaly found\n", text)
+
+    def test_flow_scan_text_formats_recent_run_drop_evidence_as_quote(self):
+        text = build_flow_scan_text(
+            Anomaly(0, "flow_scan", 42, "Orders", "INFO", None, "flow", None, None),
+            Evidence(record_drop_pct=0.0),
+            ClassificationResult("low", "Flow appears healthy.", "No action needed."),
+            found_anomaly=False,
+        )
+        self.assertIn("> Recent run-drop evidence: 0.0% below recent run average.", text)
+        self.assertLess(text.index("*Explanation:*"), text.index("> Recent run-drop evidence:"))
 
     def test_interaction_server_denies_protected_flow_and_does_not_enqueue(self):
         audit = ControlAuditRepository(":memory:")

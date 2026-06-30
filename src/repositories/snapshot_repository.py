@@ -57,6 +57,21 @@ class SnapshotRepository:
         row = cursor.fetchone()
         return int(row[0]) if row is not None else None
 
+    def get_latest_record_count(self, flow_id: int) -> int | None:
+        """Return the most recently captured volume for a flow across any window, or None.
+
+        This is the run-over-run baseline: the latest-run record count observed on a prior
+        tick. Surviving across day boundaries (unlike a single fixed date key) so a flow that
+        runs once a day is still compared to its previous run, not blinded at midnight.
+        """
+        cursor = self._conn.execute(
+            "SELECT record_count FROM metric_snapshots WHERE flow_id = ? "
+            "ORDER BY window_start DESC, captured_at DESC LIMIT 1",
+            (int(flow_id),),
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row is not None else None
+
     def purge_older_than(self, window_start: str) -> int:
         """Delete snapshots older than ``window_start`` (date string); returns rows removed."""
         cursor = self._conn.execute(

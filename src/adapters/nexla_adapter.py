@@ -71,6 +71,21 @@ def _first_list(value: Any, *keys: str) -> list[Any]:
     return []
 
 
+def _primary_health_resource(resources: Any) -> dict[str, Any] | None:
+    """Pick the affectedResource whose run fields best represent the flow's latest run.
+
+    Org-health nests per-run counts in ``affectedResources``. The SOURCE (ingestion) row
+    carries the run's record/error counts and run id, so prefer it; otherwise take the first.
+    """
+    dicts = [row for row in resources if isinstance(row, dict)] if isinstance(resources, list) else []
+    if not dicts:
+        return None
+    for row in dicts:
+        if str(row.get("resourceType") or "").strip().upper() == "SOURCE":
+            return row
+    return dicts[0]
+
+
 def _run_summary_rows(value: Any) -> list[dict[str, Any]] | None:
     if isinstance(value, list):
         rows = value
@@ -104,7 +119,19 @@ class NexlaAdapter:
         return len(flows) if isinstance(flows, Sized) else 0
 
     def get_flow(self, flow_id: int) -> dict[str, Any] | None:
-        value = _plain(self._client.flows.get(int(flow_id), flows_only=False))
+        try:
+            value = _plain(self._client.flows.get(int(flow_id), flows_only=False))
+        except Exception as exc:
+            # The SDK parses into a strict FlowResponse model that rejects valid-but-unexpected
+            # payloads (e.g. a data credential whose name is null), raising a pydantic
+            # ValidationError that would fail the whole scan. Fall back to the raw API payload,
+            # which the rest of the code already reads defensively. Read-only.
+            logger.debug("flows.get failed for %s; falling back to raw request: %s", flow_id, exc)
+            try:
+                value = _plain(self._client.request("GET", f"/flows/{int(flow_id)}", params={"flows_only": 0}))
+            except Exception as exc2:
+                logger.warning("Could not read flow %s (validated and raw both failed): %s", flow_id, exc2)
+                return None
         _log_sdk_response("flows.get", int(flow_id), value)
         return value if isinstance(value, dict) else None
 
@@ -152,6 +179,18 @@ class NexlaAdapter:
     def get_flow_health(self, flow_id: int) -> dict[str, Any] | None:
         try:
             value = _plain(self._client.flows.get_flow_health(flow_id))
+            # Real shape nests health under a `metrics` dict: {"metrics": {originNodeId,
+            # healthStatus, affectedResources: [...]}, "status": 200}. Unwrap it so healthStatus
+            # is readable top-level, and lift the primary (source) resource's run fields
+            # (latestRunId / record / error counts / errorSummary) so the enricher can use them.
+            if isinstance(value, dict) and isinstance(value.get("metrics"), dict):
+                metrics = dict(value["metrics"])
+                primary = _primary_health_resource(metrics.get("affectedResources"))
+                if isinstance(primary, dict):
+                    for key in ("latestRunId", "latestRecordCount", "latestErrorCount", "errorSummary"):
+                        if metrics.get(key) is None and primary.get(key) is not None:
+                            metrics[key] = primary[key]
+                return metrics
             rows = _first_list(value, "data", "items", "flows", "results")
             if rows:
                 for row in rows:
@@ -282,25 +321,41 @@ class NexlaAdapter:
         return None
 
     def list_unhealthy_flows(self, health_status: str = "RED") -> list[dict[str, Any]]:
-        try:
-            value = _plain(self._client.flows.get_org_health_flows(health_status=health_status))
-            rows = _first_list(value, "data", "items", "flows", "results")
-            return [row for row in rows if isinstance(row, dict)]
-        except Exception as exc:
-            logger.debug("Failed to list unhealthy flows: %s", exc)
-            return []
+        """Org-health rows for flows in the requested health state (default RED).
 
-    def list_flow_volumes(self, day: str) -> list[dict[str, Any]]:
-        """Per-flow record volume for a single UTC date window (YYYY-MM-DD).
-
-        Reads org health scoped to ``[day, day]``; each entry carries the flow's
-        ``origin_node_id``, ``healthStatus``, and ``latestRecordCount`` for that
-        window. Read-only; degrades to an empty list on any SDK error.
+        The org-health endpoint rejects a ``health_status`` query param (API ValidationError)
+        and nests rows under ``metrics.data`` with a camelCase ``healthStatus``. So we read all
+        flows and filter by health state client-side. Read-only; degrades to an empty list on
+        any SDK error.
         """
         try:
-            value = _plain(self._client.flows.get_org_health_flows(from_date=day, to_date=day))
-            rows = _first_list(value, "data", "items", "flows", "results")
+            value = _plain(self._client.flows.get_org_health_flows())
+            rows = _first_list(value, "metrics", "data", "items", "flows", "results")
+            wanted = health_status.strip().upper()
+            return [
+                row
+                for row in rows
+                if isinstance(row, dict)
+                and str(row.get("healthStatus") or row.get("health_status") or "").strip().upper() == wanted
+            ]
+        except Exception as exc:
+            logger.warning("Health-sweep detection is blind this read: failed to list unhealthy flows: %s", exc)
+            return []
+
+    def list_flow_volumes(self) -> list[dict[str, Any]]:
+        """Per-flow latest-run record volume from org health (no date window).
+
+        The windowed ``from_date``/``to_date`` org-health query returns empty against real
+        Nexla, and ``latestRecordCount`` is the latest *run's* count (paired with
+        ``latestRunId``), not a window aggregate — so Silent Failure compares each flow's
+        current latest-run volume to the previously observed one (run-over-run via metric
+        snapshots). Rows nest under ``metrics.data`` with camelCase ``originNodeId``.
+        Read-only; degrades to an empty list on any SDK error.
+        """
+        try:
+            value = _plain(self._client.flows.get_org_health_flows())
+            rows = _first_list(value, "metrics", "data", "items", "flows", "results")
             return [row for row in rows if isinstance(row, dict)]
         except Exception as exc:
-            logger.debug("Failed to list flow volumes for %s: %s", day, exc)
+            logger.warning("Silent-failure detection is blind this read: failed to list flow volumes: %s", exc)
             return []

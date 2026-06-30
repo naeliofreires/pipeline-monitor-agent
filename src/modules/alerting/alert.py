@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 from modules.classification.classifier import ClassificationResult
 from modules.detection.anomaly import Anomaly
 from modules.enrichment.enricher import Evidence
 from modules.redaction import redact
+
+# Break a paragraph into one sentence per line so a long LLM explanation is easy to scan.
+# Splits only on sentence-ending punctuation followed by whitespace + a capital/digit, so
+# decimals (95.5%) and abbreviations stay intact.
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+(?=[A-ZÀ-Ý0-9])")
+
+
+def wrap_explanation(text: str | None) -> str:
+    """Put each sentence of an explanation on its own line for readability."""
+    sentences = [part.strip() for part in _SENTENCE_BOUNDARY.split((text or "").strip()) if part.strip()]
+    return "\n".join(sentences)
+
 
 _RISK_ICON = {"high": "🔴", "low": "🟡", "unknown": "⚪"}
 _TYPE_LABEL = {
@@ -34,8 +47,16 @@ def _latest_run(evidence: Evidence) -> str:
 
 
 def _logs_status(evidence: Evidence) -> str:
+    # Reflect the actual ERROR-log check, not the overall `partial` flag — the log read can
+    # succeed (errors found, or none found) while other Evidence (e.g. run status) is missing.
     if evidence.error_summary or evidence.top_error_logs:
         return "Available"
+    check = evidence.recent_run_log_check or ""
+    if check.startswith("none_found"):
+        errors = evidence.errors_this_run if evidence.errors_this_run is not None else "?"
+        return f"No error log lines found; errors={errors}"
+    if check.startswith("inconclusive"):
+        return "Inconclusive (log read failed)"
     if evidence.partial:
         return "Inconclusive (read failed)"
     errors = evidence.errors_this_run if evidence.errors_this_run is not None else "?"
@@ -121,10 +142,10 @@ def build_anomaly_alert_text(
 
     lines += [
         "",
-        f"*Explanation:* {classification.explanation}",
+        f"*Explanation:* {wrap_explanation(classification.explanation)}",
         "",
         "*Next Steps:*",
-        f"🔹 {classification.recommended_action}",
+        f"🔹 {wrap_explanation(classification.recommended_action)}",
         "",
         f"Flow ID: {anomaly.flow_id or 'unknown'} | Detected: {_detected_at(anomaly)}"
         + (f" | Notification {anomaly.notification_id}" if anomaly.notification_id else ""),

@@ -11,7 +11,13 @@ def detect_unhealthy_flows(health_entries: list[Any] | None, existing_flow_ids: 
     seen: set[int] = set()
     anomalies: list[Anomaly] = []
     for entry in health_entries or []:
-        flow_id = optional_int(get_value(entry, "flow_id", get_value(entry, "id", get_value(entry, "origin_node_id"))))
+        flow_id = optional_int(
+            get_value(
+                entry,
+                "flow_id",
+                get_value(entry, "id", get_value(entry, "origin_node_id", get_value(entry, "originNodeId"))),
+            )
+        )
         if flow_id is None or flow_id in existing or flow_id in seen:
             continue
         seen.add(flow_id)

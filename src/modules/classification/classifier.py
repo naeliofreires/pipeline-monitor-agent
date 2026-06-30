@@ -12,6 +12,11 @@ logger = logging.getLogger(__name__)
 
 SAFE_RECOMMENDED_ACTION = "Review the Nexla notification and flow run details before taking action."
 VALID_RISKS = {"low", "high"}
+# When the LLM is unavailable or returns an unusable response, a real detected Anomaly
+# (one code already confirmed) fails safe to ``high`` so a transient LLM outage escalates
+# it rather than downgrading it — mirroring the ``uncertain`` -> ``high`` rule. A targeted
+# scan that found no Anomaly has nothing to escalate, so it stays ``unknown``.
+HIGH_RISK_FALLBACK_TYPES = {"explicit_failure", "silent_failure", "health_sweep"}
 
 
 class AnomalyClassifier(Protocol):
@@ -28,8 +33,9 @@ class ClassificationResult:
 
 
 def _fallback(anomaly: Anomaly) -> ClassificationResult:
+    risk = "high" if anomaly.type in HIGH_RISK_FALLBACK_TYPES else "unknown"
     return ClassificationResult(
-        risk_classification="unknown",
+        risk_classification=risk,
         explanation=str(redact(anomaly.message)),
         recommended_action=SAFE_RECOMMENDED_ACTION,
     )

@@ -67,3 +67,5 @@ SQLite state persists in the `pipeline-monitor-state` volume.
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests
 ```
+
+[DEMO VIDEO](https://drive.google.com/file/d/1CWkorhdjnX5TP_FAPEVD8DSY6xEG40sn/view?usp=sharing)

@@ -7,7 +7,7 @@ from typing import Any
 from adapters.llm_factory import build_llm_adapter
 from adapters.nexla_adapter import NexlaAdapter
 from config import get_nested, require_str
-from modules.alerting.alert import build_anomaly_alert_text
+from modules.alerting.alert import build_anomaly_alert_text, wrap_explanation
 from modules.alerting.sender import AlertSender, build_alert_sender
 from modules.classification.classifier import classify_anomaly
 from modules.detection.anomaly import Anomaly
@@ -15,12 +15,9 @@ from modules.detection.explicit_failure import detect_explicit_failures, is_expl
 from modules.detection.health_sweep import detect_unhealthy_flows
 from modules.detection.silent_failure import (
     DEFAULT_MIN_BASELINE_RECORDS,
-    DEFAULT_RUN_DROP_THRESHOLD_PCT,
     DEFAULT_VOLUME_THRESHOLD_PCT,
     build_run_observations,
-    build_observations,
     detect_run_drop_failures,
-    detect_silent_failures,
     extract_flow_volumes,
 )
 from modules.enrichment.enricher import Evidence, enrich_anomaly
@@ -29,11 +26,12 @@ from modules.suppression.suppression import note_alerted, should_alert
 from modules.controls.policy import ControlMetadata
 from repositories.snapshot_repository import SnapshotRepository
 from repositories.suppression_repository import SuppressionRepository
+from repositories.monitored_flow_repository import MonitoredFlowRepository, RunSnapshot
 
 logger = logging.getLogger(__name__)
 
-# Metric snapshots older than this are purged each tick; day-over-day comparison only
-# needs yesterday, the extra days leave room for a future rolling baseline.
+# Metric snapshots older than this are purged each tick; run-over-run only needs the most
+# recent prior snapshot, the extra days leave room for a future rolling baseline.
 SNAPSHOT_RETENTION_DAYS = 7
 UNHEALTHY_STATUSES = {"RED", "FAILED", "ERROR", "UNHEALTHY"}
 
@@ -78,6 +76,47 @@ def build_snapshot_repository(config: dict[str, Any]) -> SnapshotRepository:
     return SnapshotRepository(str(db_path))
 
 
+def build_monitored_flow_repository(config: dict[str, Any]) -> MonitoredFlowRepository:
+    """Build the SQLite-backed store for user-registered continuous Flow monitoring."""
+    db_path = get_nested(config, ("monitoring", "state_db_path"), "data/state.db")
+    return MonitoredFlowRepository(str(db_path))
+
+
+def handle_monitoring_command(
+    config: dict[str, Any], action: str, flow_id: int | None, metadata: dict[str, str | None]
+) -> str:
+    """Register, remove, or list continuously monitored Flows for a Slack channel."""
+    channel_id = metadata.get("channel_id")
+    if not channel_id:
+        return "Cannot update monitoring without a Slack channel ID."
+    repo = build_monitored_flow_repository(config)
+    try:
+        if action == "register":
+            if flow_id is None:
+                return "Missing Flow ID."
+            repo.register_flow(flow_id, channel_id, metadata.get("user_id"), datetime.now(timezone.utc))
+            return (
+                f"Flow {flow_id} is now being monitored in this channel. I’ll post here when a new run is "
+                "processed or when a high-risk Anomaly is found."
+            )
+        if action == "remove":
+            if flow_id is None:
+                return "Missing Flow ID."
+            removed = repo.remove_flow(flow_id, channel_id)
+            if removed:
+                return f"Flow {flow_id} is no longer monitored in this channel."
+            return f"Flow {flow_id} was not being monitored in this channel."
+        if action == "list":
+            flows = repo.list_flows(channel_id)
+            if not flows:
+                return "No Flows are currently monitored in this channel."
+            ids = ", ".join(str(flow.flow_id) for flow in flows)
+            return f"Flows monitored in this channel: {ids}."
+        return "Unknown monitoring action."
+    finally:
+        _close_quietly(repo)
+
+
 def _per_flow_thresholds(config: dict[str, Any]) -> dict[int, float]:
     overrides: dict[int, float] = {}
     for entry in get_nested(config, ("detection", "flows")) or []:
@@ -91,19 +130,6 @@ def _per_flow_thresholds(config: dict[str, Any]) -> dict[int, float]:
     return overrides
 
 
-def _per_flow_run_drop_thresholds(config: dict[str, Any]) -> dict[int, float]:
-    overrides: dict[int, float] = {}
-    for entry in get_nested(config, ("detection", "flows")) or []:
-        flow_id = entry.get("flow_id") if isinstance(entry, dict) else getattr(entry, "flow_id", None)
-        threshold = (
-            entry.get("run_drop_threshold_pct") if isinstance(entry, dict)
-            else getattr(entry, "run_drop_threshold_pct", None)
-        )
-        if flow_id is not None and threshold is not None:
-            overrides[int(flow_id)] = float(threshold)
-    return overrides
-
-
 def _scan_silent_failures(
     adapter: NexlaAdapter,
     snapshots: SnapshotRepository,
@@ -111,47 +137,28 @@ def _scan_silent_failures(
     now: datetime,
     exclude_flow_ids: set[int],
 ) -> tuple[list, dict[int, tuple[str | None, int, str | None]], str]:
-    """Read today's vs yesterday's per-flow volume and flag big drops (no writes).
+    """Flag flows whose latest run moved far fewer records than the previously observed run.
 
-    Returns ``(anomalies, today_volumes, today)``. Pure reads only — persisting
-    ``today_volumes`` is a separate step in ``monitor_once`` so this query has no side
-    effects. Wrapped by the caller so a read failure degrades to no Silent Failures.
+    Run-over-run: ``list_flow_volumes`` reads each flow's current latest-run record count
+    (the windowed day-over-day org-health query returns empty against real Nexla, and
+    ``latestRecordCount`` is a per-run count, not a window aggregate). The baseline is the
+    most recent snapshot for that flow — a prior tick's latest-run count. Pure reads only;
+    persisting today's volumes is a separate step in ``monitor_once``. Returns
+    ``(anomalies, today_volumes, today)``. Wrapped by the caller so a read failure degrades
+    to no Silent Failures.
     """
     threshold_pct = get_nested(config, ("detection", "volume_threshold_pct"), DEFAULT_VOLUME_THRESHOLD_PCT)
     min_baseline = get_nested(config, ("detection", "min_baseline_records"), DEFAULT_MIN_BASELINE_RECORDS)
-    run_drop_threshold_pct = get_nested(
-        config, ("detection", "run_drop_threshold_pct"), DEFAULT_RUN_DROP_THRESHOLD_PCT
-    )
-    min_run_baseline = get_nested(config, ("detection", "min_run_baseline_records"), min_baseline)
 
     today = now.date().isoformat()
-    yesterday = (now - timedelta(days=1)).date().isoformat()
-
-    current = extract_flow_volumes(adapter.list_flow_volumes(today))
-    baseline = extract_flow_volumes(adapter.list_flow_volumes(yesterday))
-    observations = build_observations(
-        current, baseline, baseline_fallback=lambda flow_id: snapshots.get_record_count(flow_id, yesterday)
-    )
-
-    anomalies = detect_silent_failures(
+    current = extract_flow_volumes(adapter.list_flow_volumes())
+    observations = build_run_observations(current, previous_volume=snapshots.get_latest_record_count)
+    anomalies = detect_run_drop_failures(
         observations,
         threshold_pct=float(threshold_pct),
         min_baseline=int(min_baseline),
         per_flow_threshold=_per_flow_thresholds(config),
         exclude_flow_ids=exclude_flow_ids,
-    )
-    run_exclusions = exclude_flow_ids | {anomaly.flow_id for anomaly in anomalies if anomaly.flow_id is not None}
-    run_observations = build_run_observations(
-        current, previous_volume=lambda flow_id: snapshots.get_record_count(flow_id, today)
-    )
-    anomalies.extend(
-        detect_run_drop_failures(
-            run_observations,
-            threshold_pct=float(run_drop_threshold_pct),
-            min_baseline=int(min_run_baseline),
-            per_flow_threshold=_per_flow_run_drop_thresholds(config),
-            exclude_flow_ids=run_exclusions,
-        )
     )
     return anomalies, current, today
 
@@ -334,6 +341,18 @@ def _apply_targeted_metrics_fallback(evidence: Evidence, summary: Any) -> tuple[
     ), f"Metrics Run: {metrics_run_id} (latest available; Flow last_run_id is {evidence.latest_run_id})"
 
 
+def _scan_log_line(evidence: Any) -> str:
+    """Logs line for the scan table — reflects the actual ERROR-log check, not ``partial``."""
+    if evidence.top_error_logs or evidence.error_summary:
+        return "ERROR log lines found in the latest/recent runs"
+    check = evidence.recent_run_log_check or ""
+    if check.startswith("none_found"):
+        return "No ERROR log lines in the latest/recent runs"
+    if check.startswith("inconclusive") or evidence.partial:
+        return "Inconclusive (log read failed)"
+    return "No critical log lines in supported signals"
+
+
 def build_flow_scan_text(anomaly: Anomaly, evidence: Any, classification: Any, *, found_anomaly: bool, metrics_note: str | None = None) -> str:
     flow = anomaly.flow_name or anomaly.flow_id or "unknown flow"
     flow_id = anomaly.flow_id or "unknown"
@@ -355,23 +374,231 @@ def build_flow_scan_text(anomaly: Anomaly, evidence: Any, classification: Any, *
         metrics_note,
         f"Records    : {records}",
         f"Errors     : {errors}",
-        f"Logs       : {'Inconclusive (read failed)' if evidence.partial else 'No critical log lines in supported signals'}",
+        f"Logs       : {_scan_log_line(evidence)}",
         f"Anomalies  : {'Detected' if found_anomaly else 'None detected in supported signals'}",
         "```",
     ]
     lines = [line for line in lines if line is not None]
-    if evidence.record_drop_pct is not None:
-        lines.append(f"Recent run-drop evidence: {evidence.record_drop_pct}% below recent run average.")
     if anomaly.message:
         lines.append(f"*Scan evidence:* {anomaly.message}")
     lines.append(f"*Result:* {'Anomaly found' if found_anomaly else 'No Anomaly found from the targeted scan signals.'}")
-    lines.append(f"*Explanation:* {classification.explanation}")
+    lines.append(f"*Explanation:* {wrap_explanation(classification.explanation)}")
+    if evidence.record_drop_pct is not None:
+        lines.append(f"> Recent run-drop evidence: {evidence.record_drop_pct}% below recent run average.")
     lines.append("")
     lines.append("*Next Steps:*")
-    lines.append(f"🔹 {classification.recommended_action}")
+    lines.append(f"🔹 {wrap_explanation(classification.recommended_action)}")
     if evidence.partial:
         lines.append("⚠ Evidence is partial: some flow data could not be read.")
     return "\n".join(lines)
+
+
+def _average(values: list[int]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _pct_delta(current: int | None, baseline: float | None) -> float | None:
+    if current is None or baseline is None or baseline <= 0:
+        return None
+    return (current - baseline) / baseline * 100
+
+
+def _fmt_number(value: int | float | None) -> str:
+    if value is None:
+        return "unknown"
+    if isinstance(value, float):
+        return f"{value:,.1f}"
+    return f"{value:,}"
+
+
+def _fmt_signed_number(value: int | None) -> str:
+    if value is None:
+        return "unknown"
+    return f"{value:+,}"
+
+
+def _fmt_delta(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    return f"{value:+.1f}%"
+
+
+def _records_delta(current: int | None, previous: int | None) -> int | None:
+    if current is None or previous is None:
+        return None
+    return current - previous
+
+
+def _build_run_report_text(
+    *,
+    flow_id: int,
+    flow_name: str | None,
+    run_id: str,
+    records: int | None,
+    errors: int | None,
+    status: str | None,
+    previous_runs: list[RunSnapshot],
+    avg_records: float | None,
+    records_delta_pct: float | None,
+    classification: Any | None,
+) -> str:
+    flow_label = f"{flow_name} ({flow_id})" if flow_name else str(flow_id)
+    lines = [
+        f"*New run processed for Flow {flow_label}*",
+        "",
+        f"Latest run: {run_id}",
+        f"Records: {_fmt_number(records)}",
+        f"Errors: {_fmt_number(errors)}",
+        f"Status: {status or 'unknown'}",
+    ]
+    if previous_runs:
+        previous_run = previous_runs[0]
+        previous_records = previous_run.records
+        previous_delta = _records_delta(records, previous_records)
+        previous_delta_pct = _pct_delta(records, previous_records)
+        lines.extend([
+            "",
+            f"Previous run: {previous_run.run_id}",
+            f"Previous records: {_fmt_number(previous_records)}",
+            f"Change from previous run: {_fmt_signed_number(previous_delta)} records "
+            f"({_fmt_delta(previous_delta_pct)})",
+        ])
+    lines.extend([
+        "",
+        f"Baseline: average of the previous 5 runs ({len(previous_runs)} available and used)",
+        f"Average records: {_fmt_number(avg_records)}",
+        f"Difference: {_fmt_delta(records_delta_pct)}",
+    ])
+    if classification is not None and classification.risk_classification == "high":
+        lines.extend([
+            "",
+            "Risk Classification: HIGH",
+            f"Explanation: {wrap_explanation(classification.explanation)}",
+            f"Recommended Action: {wrap_explanation(classification.recommended_action)}",
+        ])
+    else:
+        lines.extend(["", "Result: No high-risk Anomaly found from supported signals."])
+    return "\n".join(lines)
+
+
+def _channel_sender(config: dict[str, Any], channel_id: str) -> AlertSender:
+    scoped = dict(config)
+    slack = dict(scoped.get("slack", {}) or {})
+    slack["channel_id"] = channel_id
+    scoped["slack"] = slack
+    return build_alert_sender(scoped)
+
+
+def _registered_flow_anomaly(
+    flow_id: int,
+    flow_name: str | None,
+    resource_id: int | None,
+    resource_type: str,
+    health_status: str | None,
+    records: int | None,
+    avg_records: float | None,
+    drop_threshold_pct: float,
+    now: datetime,
+) -> Anomaly | None:
+    if _is_unhealthy(health_status):
+        return Anomaly(0, "health_sweep", flow_id, flow_name, "WARNING", resource_id, resource_type, "Registered Flow monitoring found unhealthy Flow health.", now)
+    if records is None or avg_records is None or avg_records <= 0:
+        return None
+    drop_pct = (avg_records - records) / avg_records * 100
+    if drop_pct < drop_threshold_pct:
+        return None
+    return Anomaly(
+        0,
+        "silent_failure",
+        flow_id,
+        flow_name,
+        "WARNING",
+        resource_id,
+        resource_type,
+        f"Latest run processed {drop_pct:.0f}% fewer records than the previous 5-run average ({records} records vs {_fmt_number(avg_records)} average)",
+        now,
+    )
+
+
+def _analyze_registered_flows(
+    adapter: NexlaAdapter,
+    llm_adapter: Any,
+    config: dict[str, Any],
+    repo: MonitoredFlowRepository,
+    now: datetime,
+) -> None:
+    recent_run_count = int(get_nested(config, ("monitoring", "registered_flow_recent_run_count"), 5))
+    drop_threshold_pct = float(get_nested(config, ("detection", "run_drop_threshold_pct"), DEFAULT_VOLUME_THRESHOLD_PCT))
+    for monitored in repo.list_flows():
+        try:
+            flow_id = monitored.flow_id
+            flow = adapter.get_flow(flow_id)
+            health = adapter.get_flow_health(flow_id)
+            primary_row = _primary_flow_row(flow, flow_id)
+            latest_run_id = _flow_get_latest_run(primary_row) or get_value(health, "latestRunId", get_value(health, "latest_run_id"))
+            if latest_run_id is None:
+                repo.mark_checked(flow_id, monitored.channel_id, now)
+                continue
+            run_id = str(latest_run_id)
+            flow_name = _flow_name(flow, health)
+            health_status = str(_flow_get_health_status(health) or "").strip().upper() or None
+            flow_status = str(_flow_get_status(primary_row) or "").strip().upper() or None
+            resource_type, resource_id = _flow_get_resource(primary_row)
+
+            fallback_health = {"healthStatus": health_status, "status": flow_status, "latestRunId": run_id, "name": flow_name}
+            enrich_adapter = _FlowGetFallbackAdapter(adapter, fallback_health)
+            probe = Anomaly(0, "flow_scan", flow_id, flow_name, "INFO", resource_id, resource_type, "Registered Flow monitoring run check.", now)
+            evidence = enrich_anomaly(probe, enrich_adapter)
+            metrics_note = None
+            try:
+                summary = enrich_adapter.get_run_summary(flow_id, resource_type, resource_id, run_id)
+            except Exception:
+                summary = None
+            evidence, metrics_note = _apply_targeted_metrics_fallback(evidence, summary)
+            records = evidence.records_this_run
+            errors = evidence.errors_this_run
+            status = evidence.run_status
+
+            previous_runs = repo.recent_run_snapshots(flow_id, exclude_run_id=run_id, limit=recent_run_count)
+            avg_records = _average([int(snapshot.records) for snapshot in previous_runs if snapshot.records is not None])
+            records_delta_pct = _pct_delta(records, avg_records)
+            anomaly = _registered_flow_anomaly(flow_id, flow_name, resource_id, resource_type, health_status, records, avg_records, drop_threshold_pct, now)
+            classification = classify_anomaly(anomaly, evidence, llm_adapter) if anomaly is not None else None
+            is_new_run = monitored.last_seen_run_id != run_id
+            should_send_high_risk = classification is not None and classification.risk_classification == "high" and monitored.last_alerted_run_id != run_id
+
+            repo.save_run_snapshot(flow_id, run_id, records, errors, status, now)
+            if is_new_run or should_send_high_risk:
+                text = _build_run_report_text(
+                    flow_id=flow_id,
+                    flow_name=flow_name,
+                    run_id=run_id,
+                    records=records,
+                    errors=errors,
+                    status=status,
+                    previous_runs=previous_runs,
+                    avg_records=avg_records,
+                    records_delta_pct=records_delta_pct,
+                    classification=classification,
+                )
+                _ = metrics_note
+                _channel_sender(config, monitored.channel_id).send(text, ControlMetadata(flow_id, flow_name, flow_status or health_status))
+                repo.mark_checked(
+                    flow_id,
+                    monitored.channel_id,
+                    now,
+                    last_seen_run_id=run_id if is_new_run else None,
+                    last_alerted_run_id=run_id if should_send_high_risk else None,
+                )
+            else:
+                repo.mark_checked(flow_id, monitored.channel_id, now)
+        except Exception:
+            logger.warning(
+                "Registered Flow monitoring failed for flow %s in channel %s; continuing",
+                monitored.flow_id,
+                monitored.channel_id,
+                exc_info=True,
+            )
 
 
 def scan_flow(config: dict[str, Any], flow_id: int) -> str:
@@ -457,6 +684,7 @@ def monitor_once(config: dict[str, Any], alert_sender: AlertSender | None = None
     # always closes both SQLite connections, even if a detection read raises.
     suppression = build_suppression_repository(config)
     snapshots = build_snapshot_repository(config)
+    monitored_flows = build_monitored_flow_repository(config)
     sender = alert_sender or build_alert_sender(config)
     try:
         blocklist = config.get("blocklist", [])
@@ -529,9 +757,12 @@ def monitor_once(config: dict[str, Any], alert_sender: AlertSender | None = None
         for flow_id, (_name, count, _status) in today_volumes.items():
             snapshots.save_snapshot(flow_id, today, count, now)
 
+        _analyze_registered_flows(adapter, llm_adapter, config, monitored_flows, now)
+
         # Housekeeping: drop state past its retention horizon so the SQLite file stays small.
         suppression.purge_expired(now)
         snapshots.purge_older_than((now - timedelta(days=SNAPSHOT_RETENTION_DAYS)).date().isoformat())
     finally:
         _close_quietly(suppression)
         _close_quietly(snapshots)
+        _close_quietly(monitored_flows)

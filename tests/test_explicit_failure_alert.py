@@ -14,9 +14,9 @@ from adapters.nexla_adapter import NexlaAdapter, _plain, _resource_type_for_metr
 from modules.detection.anomaly import Anomaly
 from modules.detection.explicit_failure import detect_explicit_failures
 from modules.detection.health_sweep import detect_unhealthy_flows
-from modules.enrichment.enricher import Evidence, enrich_anomaly
+from modules.enrichment.enricher import Evidence, enrich_anomaly, _short_log
 from modules.classification.classifier import classify_anomaly
-from modules.alerting.alert import build_anomaly_alert_text
+from modules.alerting.alert import build_anomaly_alert_text, _logs_status
 from modules.alerting.sender import ConsoleAlertSender, SlackBotAlertSender, build_alert_sender
 from modules.controls.policy import ControlMetadata
 from monitor import monitor_once, scan_flow
@@ -50,16 +50,23 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(result.explanation, "maybe")
         self.assertEqual(result.recommended_action, "inspect")
 
-    def test_invalid_or_exception_falls_back_to_unknown_and_raw_message(self):
+    def test_invalid_or_exception_falls_back_to_high_for_real_anomalies(self):
         anomaly = Anomaly(1, "explicit_failure", 42, "Orders", "ERROR", 99, "flow", "raw failure", "now")
 
         invalid = classify_anomaly(anomaly, Evidence(), RecordingLLM({"risk_classification": "bogus"}))
         raised = classify_anomaly(anomaly, Evidence(), RecordingLLM(exc=RuntimeError("llm down")))
 
+        # A real detected Anomaly fails safe to high so a transient LLM outage escalates it.
         for result in (invalid, raised):
-            self.assertEqual(result.risk_classification, "unknown")
+            self.assertEqual(result.risk_classification, "high")
             self.assertEqual(result.explanation, "raw failure")
             self.assertIn("Review the Nexla notification", result.recommended_action)
+
+    def test_fallback_stays_unknown_for_clean_targeted_scan(self):
+        # A targeted scan that found no Anomaly has nothing to escalate on LLM failure.
+        anomaly = Anomaly(0, "flow_scan", 42, "Orders", "INFO", None, "flow", "no anomaly", "now")
+        result = classify_anomaly(anomaly, Evidence(), RecordingLLM(exc=RuntimeError("llm down")))
+        self.assertEqual(result.risk_classification, "unknown")
 
     def test_payload_includes_evidence(self):
         llm = RecordingLLM({"risk_classification": "low", "explanation": "ok", "recommended_action": "watch"})
@@ -115,7 +122,7 @@ class DetectionAndEnrichmentTests(unittest.TestCase):
                 }
             def get_flow_health(self, flow_id):
                 return {"status": 200}
-            def list_flow_volumes(self, day):
+            def list_flow_volumes(self):
                 return []
             def get_run_status(self, flow_id, run_id):
                 self.calls.append(("status", flow_id, run_id))
@@ -164,7 +171,7 @@ class DetectionAndEnrichmentTests(unittest.TestCase):
             def get_flow(self, flow_id):
                 return {"flows": [{"id": flow_id, "origin_node_id": flow_id, "data_source_id": 122875, "status": "ACTIVE", "name": "Orders Flow", "last_run_id": 1782738276439}]}
             def get_flow_health(self, flow_id): return None
-            def list_flow_volumes(self, day): return []
+            def list_flow_volumes(self): return []
             def get_run_status(self, flow_id, run_id): return None
             def get_run_metrics(self, flow_id, resource_type=None, resource_id=None, run_id=None): return None
             def get_run_summary(self, flow_id, resource_type=None, resource_id=None, run_id=None):
@@ -318,16 +325,24 @@ class DetectionAndEnrichmentTests(unittest.TestCase):
                 calls.append(("get_by_resource", resource_type, resource_id, flows_only))
                 return {"flows": [{"id": 1, "origin_node_id": 42}]}
 
-            def get_org_health_flows(self, health_status="RED"):
-                calls.append(("get_org_health_flows", health_status))
-                return {"data": [{"origin_node_id": 42, "healthStatus": "RED"}]}
+            def get_org_health_flows(self):
+                # Real prod shape: rows nested under metrics.data, camelCase fields, no
+                # health_status param (the API rejects it). Adapter filters RED client-side.
+                calls.append(("get_org_health_flows",))
+                return {"status": 200, "metrics": {"data": [
+                    {"originNodeId": 42, "healthStatus": "RED", "latestRecordCount": 0},
+                    {"originNodeId": 7, "healthStatus": "GREEN", "latestRecordCount": 10},
+                ]}}
 
             def search_flow_logs(self, flow_id, run_ids=None, severity=None, size=None):
                 calls.append(("search_flow_logs", flow_id, run_ids, severity, size))
                 return {"logs": [{"level": "ERROR", "message": "boom"}]}
 
             def get_flow_health(self, flow_id):
-                return {"status": 200, "data": [{"origin_node_id": 42, "healthStatus": "RED", "latestRunId": 123, "latestRecordCount": 0, "latestErrorCount": 2}]}
+                # Real shape: health nested under metrics, run fields under affectedResources.
+                return {"status": 200, "metrics": {"originNodeId": 42, "healthStatus": "RED", "affectedResources": [
+                    {"resourceType": "SOURCE", "resourceId": 99, "status": "ERROR", "latestRunId": 123, "latestRecordCount": 0, "latestErrorCount": 2, "errorSummary": None},
+                ]}}
 
             def get_run_status(self, flow_id, run_id):
                 calls.append(("get_run_status", flow_id, run_id))
@@ -347,8 +362,12 @@ class DetectionAndEnrichmentTests(unittest.TestCase):
 
         self.assertEqual(adapter.resolve_flow("data_sink", 99), 42)
         self.assertEqual(adapter.resolve_flow("flow", 42), 42)
-        self.assertEqual(adapter.list_unhealthy_flows(), [{"origin_node_id": 42, "healthStatus": "RED"}])
-        self.assertEqual(adapter.get_flow_health(42), {"origin_node_id": 42, "healthStatus": "RED", "latestRunId": 123, "latestRecordCount": 0, "latestErrorCount": 2})
+        self.assertEqual(adapter.list_unhealthy_flows(), [{"originNodeId": 42, "healthStatus": "RED", "latestRecordCount": 0}])
+        health = adapter.get_flow_health(42)
+        self.assertEqual(health["healthStatus"], "RED")
+        self.assertEqual(health["latestRunId"], 123)        # lifted from the SOURCE affectedResource
+        self.assertEqual(health["latestRecordCount"], 0)
+        self.assertEqual(health["latestErrorCount"], 2)
         self.assertEqual(adapter.get_flow_error_logs(42, 123), [{"level": "ERROR", "message": "boom"}])
         self.assertEqual(adapter.get_run_status(42, "123"), {"status": "FAILED"})
         self.assertEqual(adapter.get_run_metrics(42, "data_sink", 99, 123), {"runId": 123, "records": 0, "errors": 2})
@@ -643,8 +662,8 @@ class MonitorTests(unittest.TestCase):
                 events.append(("health_sweep",))
                 return [{"id": 42}, {"id": 77, "name": "No notification", "errorSummary": "red"}]
 
-            def list_flow_volumes(self, day):
-                events.append(("volumes", day))
+            def list_flow_volumes(self):
+                events.append(("volumes",))
                 return []
 
             def get_flow_health(self, flow_id):
@@ -700,7 +719,7 @@ class MonitorTests(unittest.TestCase):
             def list_unhealthy_flows(self):
                 return []
 
-            def list_flow_volumes(self, day):
+            def list_flow_volumes(self):
                 return []
 
             def get_flow_health(self, flow_id):
@@ -760,8 +779,8 @@ class MonitorTests(unittest.TestCase):
                 events.append(("health_sweep",))
                 return [{"id": 42, "name": "CSV_records Flow", "errorSummary": "red"}]
 
-            def list_flow_volumes(self, day):
-                events.append(("volumes", day))
+            def list_flow_volumes(self):
+                events.append(("volumes",))
                 return []
 
             def get_flow_health(self, flow_id):
@@ -835,6 +854,105 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(sent, ["Pipeline monitor Slack smoke test passed."])
         self.assertIn("Slack smoke test passed", output.getvalue())
+
+
+class LogsStatusTests(unittest.TestCase):
+    def test_logs_line_reflects_log_check_not_partial(self):
+        # Log read succeeded (no ERROR logs) while other Evidence is partial: must NOT say
+        # "read failed" — that conflated a missing run status with a failed log read.
+        none_found = Evidence(partial=True, recent_run_log_check="none_found: no Nexla ERROR log anomalies were found for the latest/recent runs")
+        self.assertEqual(_logs_status(none_found), "No error log lines found; errors=?")
+
+        inconclusive = Evidence(partial=True, recent_run_log_check="inconclusive: unable to check Nexla ERROR logs for the latest/recent runs")
+        self.assertEqual(_logs_status(inconclusive), "Inconclusive (log read failed)")
+
+        found = Evidence(top_error_logs=("ERROR boom",), partial=True, recent_run_log_check="anomalies_found: ...")
+        self.assertEqual(_logs_status(found), "Available")
+
+        # No log-check signal at all falls back to the overall partial flag.
+        self.assertEqual(_logs_status(Evidence(partial=True)), "Inconclusive (read failed)")
+
+    def test_evidence_not_partial_when_run_status_unavailable_but_core_data_read(self):
+        # Nexla's API returns no run lifecycle status (get_run_status -> []), so run_status is
+        # None on most flows. With health, run id, counts, and logs all read, Evidence must NOT
+        # be flagged partial just because run_status is missing — that warning would cry wolf.
+        class Adapter:
+            def get_flow_health(self, flow_id):
+                return {"healthStatus": "RED", "latestRunId": "r1", "latestRecordCount": 3, "latestErrorCount": 4}
+            def get_run_status(self, flow_id, run_id):
+                return None  # API returned [] -> adapter None
+            def get_run_metrics(self, flow_id, resource_type=None, resource_id=None, run_id=None):
+                return None  # flow-level anomaly: no single resource
+            def get_run_summary(self, flow_id, resource_type=None, resource_id=None, run_id=None):
+                return None
+            def get_flow_error_logs(self, flow_id, run_id, limit=5):
+                return [{"severity": "ERROR", "log": "boom", "timestamp": 1}]
+        evidence = enrich_anomaly(Anomaly(0, "health_sweep", 42, None, "ERROR", None, "flow", "x", None), Adapter())
+        self.assertFalse(evidence.partial)
+        self.assertEqual(evidence.records_this_run, 3)
+        self.assertEqual(evidence.errors_this_run, 4)
+
+    def test_evidence_partial_when_no_run_volume_at_all(self):
+        class Adapter:
+            def get_flow_health(self, flow_id):
+                return {"healthStatus": "RED", "latestRunId": "r1"}  # no counts anywhere
+            def get_run_status(self, flow_id, run_id):
+                return None
+            def get_run_metrics(self, flow_id, resource_type=None, resource_id=None, run_id=None):
+                return None
+            def get_run_summary(self, flow_id, resource_type=None, resource_id=None, run_id=None):
+                return None
+            def get_flow_error_logs(self, flow_id, run_id, limit=5):
+                return []
+        evidence = enrich_anomaly(Anomaly(0, "health_sweep", 42, None, "ERROR", None, "flow", "x", None), Adapter())
+        self.assertTrue(evidence.partial)
+
+    def test_short_log_reads_nexla_log_and_severity_fields(self):
+        entry = {"timestamp": 1782495562877, "severity": "ERROR", "log": "4 records failed. Too many entries", "resource_id": 124462}
+        rendered = _short_log(entry)
+        self.assertIn("ERROR", rendered)
+        self.assertIn("4 records failed. Too many entries", rendered)
+
+
+class AdapterResilienceTests(unittest.TestCase):
+    def test_get_flow_falls_back_to_raw_request_on_sdk_validation_error(self):
+        # The SDK's strict FlowResponse model rejects e.g. a null data-credential name and
+        # raises a pydantic ValidationError; get_flow must fall back to the raw API payload
+        # instead of failing the whole scan.
+        calls = []
+
+        class Flows:
+            def get(self, flow_id, flows_only=False, include_run_metrics=False):
+                raise ValueError("2 validation errors for FlowResponse: data_credentials.0.name")
+
+        class Client:
+            flows = Flows()
+
+            def request(self, method, path, params=None):
+                calls.append((method, path, params))
+                return {"flows": [{"id": 588132, "name": "Random User API", "status": "ACTIVE", "data_source_id": 118379}]}
+
+        adapter = NexlaAdapter.__new__(NexlaAdapter)
+        setattr(adapter, "_client", Client())
+        flow = adapter.get_flow(588132)
+        self.assertEqual(flow["flows"][0]["name"], "Random User API")
+        self.assertEqual(flow["flows"][0]["id"], 588132)
+        self.assertEqual(calls, [("GET", "/flows/588132", {"flows_only": 0})])
+
+    def test_get_flow_returns_none_when_raw_request_also_fails(self):
+        class Flows:
+            def get(self, flow_id, flows_only=False, include_run_metrics=False):
+                raise ValueError("validation error")
+
+        class Client:
+            flows = Flows()
+
+            def request(self, method, path, params=None):
+                raise RuntimeError("network down")
+
+        adapter = NexlaAdapter.__new__(NexlaAdapter)
+        setattr(adapter, "_client", Client())
+        self.assertIsNone(adapter.get_flow(588132))
 
 
 if __name__ == "__main__":

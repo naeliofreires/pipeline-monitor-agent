@@ -6,26 +6,11 @@ from typing import Any, Callable, Iterable
 from modules.detection.anomaly import Anomaly
 from modules.parsing import get_value, optional_int
 
-# Default threshold: a flow is a Silent Failure when its volume drops by at least
-# this percentage versus the same window yesterday.
+# Default threshold: a flow is a Silent Failure when its latest run moved at least this
+# percentage fewer records than the previously observed run (run-over-run via snapshots).
 DEFAULT_VOLUME_THRESHOLD_PCT = 40.0
-# Exceptional run-over-run threshold. The day-over-day rule remains the primary
-# signal; this catches sharp drops between the last captured run/observation and
-# the current one.
-DEFAULT_RUN_DROP_THRESHOLD_PCT = 80.0
 # Flows whose baseline volume is below this are too small/variable to alert on.
 DEFAULT_MIN_BASELINE_RECORDS = 100
-
-
-@dataclass(frozen=True)
-class VolumeObservation:
-    """A flow's record volume now versus the same window yesterday."""
-
-    flow_id: int
-    flow_name: str | None
-    current_volume: int
-    baseline_volume: int | None
-    status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,7 +77,11 @@ def extract_flow_volumes(rows: Iterable[Any] | None) -> dict[int, tuple[str | No
     volumes: dict[int, tuple[str | None, int, str | None]] = {}
     for row in rows or []:
         flow_id = optional_int(
-            get_value(row, "flow_id", get_value(row, "origin_node_id", get_value(row, "id")))
+            get_value(
+                row,
+                "flow_id",
+                get_value(row, "origin_node_id", get_value(row, "originNodeId", get_value(row, "id"))),
+            )
         )
         if flow_id is None:
             continue
@@ -102,35 +91,14 @@ def extract_flow_volumes(rows: Iterable[Any] | None) -> dict[int, tuple[str | No
     return volumes
 
 
-def build_observations(
-    current: dict[int, tuple[str | None, int, str | None]],
-    baseline: dict[int, tuple[str | None, int, str | None]],
-    baseline_fallback: Callable[[int], int | None] | None = None,
-) -> list[VolumeObservation]:
-    """Pair each flow's current volume with its baseline (same window yesterday).
-
-    ``current`` and ``baseline`` are the parsed maps from :func:`extract_flow_volumes`.
-    When a flow has no baseline row, ``baseline_fallback`` (e.g. a snapshot lookup) is
-    consulted so a missing yesterday window does not blind the comparison.
-    """
-    observations: list[VolumeObservation] = []
-    for flow_id, (name, count, status) in current.items():
-        baseline_volume = baseline.get(flow_id, (None, None, None))[1]
-        if baseline_volume is None and baseline_fallback is not None:
-            baseline_volume = baseline_fallback(flow_id)
-        observations.append(VolumeObservation(flow_id, name, count, baseline_volume, status))
-    return observations
-
-
 def build_run_observations(
     current: dict[int, tuple[str | None, int, str | None]],
     previous_volume: Callable[[int], int | None],
 ) -> list[RunVolumeObservation]:
-    """Pair current flow volumes with the previous captured same-day volume.
+    """Pair each flow's current latest-run volume with the previously observed one.
 
-    The previous value comes from the snapshot store before the current tick upserts
-    today's latest count. This makes the comparison run/observation-over-run without
-    changing the day-over-day baseline behavior.
+    ``previous_volume`` reads the most recent snapshot for the flow (a prior tick's
+    latest-run count), captured before this tick upserts the current count.
     """
     return [
         RunVolumeObservation(flow_id, name, count, previous_volume(flow_id), status)
@@ -138,61 +106,20 @@ def build_run_observations(
     ]
 
 
-def detect_silent_failures(
-    observations: Iterable[VolumeObservation],
+def detect_run_drop_failures(
+    observations: Iterable[RunVolumeObservation],
     *,
     threshold_pct: float = DEFAULT_VOLUME_THRESHOLD_PCT,
     min_baseline: int = DEFAULT_MIN_BASELINE_RECORDS,
     per_flow_threshold: dict[int, float] | None = None,
     exclude_flow_ids: set[int] | None = None,
 ) -> list[Anomaly]:
-    """Flag flows whose volume dropped at least the threshold versus yesterday.
+    """Flag flows whose latest run moved far fewer records than the previously observed run.
 
-    A flow is skipped when it has no baseline, when the baseline is below
-    ``min_baseline`` (too small to be meaningful), or when it is already being
-    reported this tick (``exclude_flow_ids``). The per-flow threshold overrides
-    the global one for flows with high natural variance.
-    """
-    excluded = exclude_flow_ids or set()
-    overrides = per_flow_threshold or {}
-    anomalies: list[Anomaly] = []
-
-    for obs in observations:
-        if obs.flow_id in excluded:
-            continue
-        if not _is_running_status(obs.status):
-            continue
-        baseline = obs.baseline_volume
-        # baseline <= 0 also guards the division below when min_baseline is configured to 0.
-        if baseline is None or baseline <= 0 or baseline < min_baseline:
-            continue
-        flow_threshold = float(overrides.get(obs.flow_id, threshold_pct))
-        drop_pct = (baseline - obs.current_volume) / baseline * 100
-        if drop_pct < flow_threshold:
-            continue
-        message = (
-            f"Volume dropped {drop_pct:.0f}% versus the same window yesterday "
-            f"({obs.current_volume} records today vs {baseline} yesterday)"
-        )
-        anomalies.append(
-            Anomaly(0, "silent_failure", obs.flow_id, obs.flow_name, "WARNING", None, "flow", message, None)
-        )
-    return anomalies
-
-
-def detect_run_drop_failures(
-    observations: Iterable[RunVolumeObservation],
-    *,
-    threshold_pct: float = DEFAULT_RUN_DROP_THRESHOLD_PCT,
-    min_baseline: int = DEFAULT_MIN_BASELINE_RECORDS,
-    per_flow_threshold: dict[int, float] | None = None,
-    exclude_flow_ids: set[int] | None = None,
-) -> list[Anomaly]:
-    """Flag exceptional drops versus the previous captured run/observation.
-
-    This is a secondary Silent Failure detector. It keeps the same conservative
-    requirements as the day-over-day rule: the flow must still look running/healthy,
-    have a meaningful previous volume, and not already have an Anomaly this tick.
+    Run-over-run Silent Failure detection: the flow must still look running/healthy, have a
+    meaningful previous volume (>= ``min_baseline``), and not already have an Anomaly this
+    tick (``exclude_flow_ids``). The per-flow threshold overrides the global one for flows
+    with high natural variance.
     """
     excluded = exclude_flow_ids or set()
     overrides = per_flow_threshold or {}

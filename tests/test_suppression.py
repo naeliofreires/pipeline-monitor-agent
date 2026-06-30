@@ -83,7 +83,7 @@ class SuppressionMonitorTests(unittest.TestCase):
             def list_unhealthy_flows(self):
                 return [{"id": 77, "name": "Persistently red", "errorSummary": "still red"}]
 
-            def list_flow_volumes(self, day):
+            def list_flow_volumes(self):
                 return []
 
             def get_flow_health(self, flow_id):

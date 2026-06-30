@@ -64,7 +64,10 @@ def _coalesce(*values: Any) -> Any:
 
 def _short_log(entry: Any) -> str:
     if isinstance(entry, dict):
-        parts = [entry.get("timestamp"), entry.get("level"), entry.get("message")]
+        # Nexla flow logs use `log` (message text) and `severity`; keep message/level as fallbacks.
+        level = entry.get("severity") or entry.get("level")
+        message = entry.get("log") or entry.get("message") or entry.get("msg")
+        parts = [entry.get("timestamp"), level, message]
         return " ".join(str(p) for p in parts if p)[:300]
     return str(entry)[:300]
 
@@ -224,10 +227,25 @@ def enrich_anomaly(anomaly: Anomaly, nexla_adapter: AnomalyEnricher) -> Evidence
             logs = []
             log_check_inconclusive = True
             partial = True
-        if run_status is None or metrics is None:
-            partial = True
 
     historical = _historical_summary(run_summary, latest_run_id)
+    records_this_run = _coalesce(
+        _first(metrics, "records", "record_count", "latestRecordCount"),
+        _first(health, "latestRecordCount"),
+        historical.get("latest_records_from_summary"),
+    )
+    errors_this_run = _coalesce(
+        _first(metrics, "errors", "error_count", "latestErrorCount"),
+        _first(health, "latestErrorCount"),
+        historical.get("latest_errors_from_summary"),
+    )
+    # Evidence is partial only when a read we depend on genuinely failed: health unavailable,
+    # the latest run unidentifiable, the ERROR-log read failed (set above), or no run volume at
+    # all. run_status and the per-resource metrics endpoint are best-effort — Nexla's org-health
+    # API does not expose run lifecycle status, and a flow-level anomaly has no single resource —
+    # so their absence alone must not flag Evidence partial (it would fire on nearly every alert).
+    if records_this_run is None and errors_this_run is None:
+        partial = True
     if log_check_inconclusive:
         recent_run_log_check = "inconclusive: unable to check Nexla ERROR logs for the latest/recent runs"
     elif logs:
@@ -241,8 +259,8 @@ def enrich_anomaly(anomaly: Anomaly, nexla_adapter: AnomalyEnricher) -> Evidence
         flow_status=_flow_status(health),
         run_status=_coalesce(_first(run_status, "status", "runStatus", "run_status"), historical.get("latest_status_from_summary")),
         latest_run_id=latest_run_id,
-        records_this_run=_coalesce(_first(metrics, "records", "record_count", "latestRecordCount"), _first(health, "latestRecordCount"), historical.get("latest_records_from_summary")),
-        errors_this_run=_coalesce(_first(metrics, "errors", "error_count", "latestErrorCount"), _first(health, "latestErrorCount"), historical.get("latest_errors_from_summary")),
+        records_this_run=records_this_run,
+        errors_this_run=errors_this_run,
         error_summary=_first(health, "errorSummary", "error_summary"),
         top_error_logs=tuple(_short_log(log) for log in logs[:5]),
         recent_run_count=historical.get("recent_run_count"),

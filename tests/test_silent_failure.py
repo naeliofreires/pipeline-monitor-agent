@@ -558,6 +558,57 @@ class RegisteredFlowMonitoringTests(unittest.TestCase):
         self.assertIn("*Difference:* +100.0%", text)
         self.assertEqual(monitored.list_flows("C1")[0].last_seen_run_id, "r6")
 
+    def test_explicit_sender_routes_registered_flow_report_and_skips_slack(self):
+        """The console/chat watcher passes an explicit sender; registered-Flow reports must go
+        there (their channel_id is "cli", not a real Slack channel) and never call _channel_sender."""
+        from repositories.suppression_repository import SuppressionRepository
+
+        sent = []
+        now = datetime.now(timezone.utc)
+
+        class FakeNexlaAdapter:
+            def __init__(self, service_key, api_url=None): pass
+            def list_unread_notifications(self, from_timestamp=None): return []
+            def list_unhealthy_flows(self): return []
+            def list_flow_volumes(self): return []
+            def mark_notifications_read(self, ids): pass
+            def get_flow(self, flow_id): return {"id": flow_id, "name": "Orders", "latestRunId": "r6", "status": "ACTIVE"}
+            def get_flow_health(self, flow_id): return {"healthStatus": "GREEN", "latestRunId": "r6", "name": "Orders"}
+            def get_run_status(self, flow_id, run_id): return {"status": "SUCCESS"}
+            def get_run_metrics(self, flow_id, resource_type=None, resource_id=None, run_id=None): return {"records": 600, "errors": 0}
+            def get_run_summary(self, flow_id, resource_type=None, resource_id=None, run_id=None): return []
+            def get_flow_error_logs(self, flow_id, run_id, limit=5): return []
+
+        class FakeOpencodeAdapter:
+            def classify_anomaly(self, payload):
+                return {"risk_classification": "low", "explanation": "normal", "recommended_action": "Keep watching"}
+
+        class CaptureSender:
+            def send(self, text, metadata=None): sent.append(text)
+
+        suppression = SuppressionRepository(":memory:")
+        snapshots = SnapshotRepository(":memory:")
+        monitored = MonitoredFlowRepository(":memory:")
+        monitored.register_flow(42, "cli", "U1", now)
+        for i, records in enumerate([100, 200, 300, 400, 500], start=1):
+            monitored.save_run_snapshot(42, f"r{i}", records, 0, "SUCCESS", now + timedelta(minutes=i))
+        suppression.close = lambda: None
+        snapshots.close = lambda: None
+        monitored.close = lambda: None
+
+        config = {"nexla": {"service_key": "sk"}, "monitoring": {"notification_lookback_hours": None}}
+        with patch("monitor.NexlaAdapter", FakeNexlaAdapter), patch(
+            "monitor.build_llm_adapter", return_value=FakeOpencodeAdapter()
+        ), patch("monitor.build_suppression_repository", return_value=suppression), patch(
+            "monitor.build_snapshot_repository", return_value=snapshots
+        ), patch("monitor.build_monitored_flow_repository", return_value=monitored), patch(
+            "monitor._channel_sender", side_effect=AssertionError("Slack channel sender must not be used")
+        ):
+            monitor_once(config, CaptureSender())
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn("New run processed", sent[0])
+
     def test_registered_flow_high_risk_run_includes_classification(self):
         from repositories.suppression_repository import SuppressionRepository
 

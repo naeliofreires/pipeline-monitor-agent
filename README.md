@@ -40,6 +40,22 @@ uv run pipeline-monitor --smoke nexla         # check Nexla connectivity
 uv run pipeline-monitor --config config.yaml  # start the scheduler
 ```
 
+You can also drive it in plain English from the terminal. The LLM decides which
+behavior to run — scan a flow, scan the org, list a flow's latest runs, or manage
+monitoring — and falls back to a deterministic parser if it's unavailable
+(ADR-0008). Pause/activate are never LLM-callable.
+
+```bash
+uv run pipeline-monitor --ask "show me the last runs of flow 1234"
+uv run pipeline-monitor --chat                   # interactive session (help, quit)
+```
+
+In `--chat`, a background watcher polls on the same interval as the scheduler and
+prints any new anomalies above the prompt, so problems surface without your having
+to ask. Set `monitoring.chat_watch_enabled: false` to turn it off.
+
+Set `router.enabled: false` in `config.yaml` to force deterministic-only routing.
+
 The scheduler polls immediately, then every `poll_interval_seconds` (300s by
 default). A failing tick is logged and retried, never fatal. With Slack controls
 on, it also serves slash commands (`scan`, `monitoring …`) and confirm buttons.

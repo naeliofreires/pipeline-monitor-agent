@@ -293,6 +293,23 @@ class FlowControlTests(unittest.TestCase):
         self.assertEqual(calls, [({"x": 1}, 42)])
         self.assertIn("targeted analysis", json.loads(requests[0].data.decode())["text"])
 
+    def test_slack_command_executor_runs_targeted_scan_with_flow_keyword(self):
+        calls = []
+        requests = []
+        class ImmediateThread:
+            def __init__(self, target, args=(), daemon=None): self.target = target; self.args = args
+            def start(self): self.target(*self.args)
+        class Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        def flow_scan(config, flow_id):
+            calls.append((config, flow_id))
+            return "targeted analysis"
+        with patch("modules.controls.commands.threading.Thread", ImmediateThread), patch("modules.controls.commands.urllib.request.urlopen", lambda req, timeout=3: requests.append(req) or Resp()):
+            response = SlackCommandExecutor({"x": 1}, lambda config: None, flow_scan).handle({"text": ["scan flow 42"], "response_url": ["https://slack.response"]})
+        self.assertIn("targeted scan", response)
+        self.assertEqual(calls, [({"x": 1}, 42)])
+
     def test_targeted_flow_health_status_followup_includes_flow_buttons(self):
         requests = []
         class ImmediateThread:

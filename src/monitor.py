@@ -526,7 +526,12 @@ def _analyze_registered_flows(
     config: dict[str, Any],
     repo: MonitoredFlowRepository,
     now: datetime,
+    channel_sender_override: AlertSender | None = None,
 ) -> None:
+    """Post run reports for each registered Flow. Without an override, each Flow's report goes to
+    the Slack channel it was registered in. The override (used by the console/chat watcher, whose
+    ``channel_id`` is ``"cli"`` rather than a real Slack channel) routes every report to one
+    destination instead of attempting a Slack post."""
     recent_run_count = int(get_nested(config, ("monitoring", "registered_flow_recent_run_count"), 5))
     drop_threshold_pct = float(get_nested(config, ("detection", "run_drop_threshold_pct"), DEFAULT_VOLUME_THRESHOLD_PCT))
     for monitored in repo.list_flows():
@@ -582,7 +587,8 @@ def _analyze_registered_flows(
                     classification=classification,
                 )
                 _ = metrics_note
-                _channel_sender(config, monitored.channel_id).send(text, ControlMetadata(flow_id, flow_name, flow_status or health_status))
+                sender = channel_sender_override or _channel_sender(config, monitored.channel_id)
+                sender.send(text, ControlMetadata(flow_id, flow_name, flow_status or health_status))
                 repo.mark_checked(
                     flow_id,
                     monitored.channel_id,
@@ -599,6 +605,29 @@ def _analyze_registered_flows(
                 monitored.channel_id,
                 exc_info=True,
             )
+
+
+def latest_runs(config: dict[str, Any], flow_id: int, limit: int = 10) -> str:
+    """Read-only: fetch the latest runs for one Flow and return a compact text table."""
+    service_key = _required_config_value(config, ("nexla", "service_key"), "Nexla service key")
+    adapter = build_nexla_adapter(config, service_key)
+    flow = adapter.get_flow(flow_id)
+    health = adapter.get_flow_health(flow_id)
+    name = _flow_name(flow, health, fallback=f"Flow {flow_id}")
+    primary_row = _primary_flow_row(flow, flow_id)
+    resource_type, resource_id = _flow_get_resource(primary_row)
+    runs = adapter.get_flow_runs(flow_id, resource_type, resource_id, limit)
+    if not runs:
+        return f"No runs found for {name} (ID {flow_id})."
+    header = f"Latest {len(runs)} run(s) for {name} (ID {flow_id}):"
+    lines = ["run_id | status | records | errors"]
+    for run in runs:
+        lines.append(
+            f"{run['run_id']} | {run['status'] or 'unknown'} | "
+            f"{run['records'] if run['records'] is not None else '-'} | "
+            f"{run['errors'] if run['errors'] is not None else '-'}"
+        )
+    return header + "\n```\n" + "\n".join(lines) + "\n```"
 
 
 def scan_flow(config: dict[str, Any], flow_id: int) -> str:
@@ -757,7 +786,13 @@ def monitor_once(config: dict[str, Any], alert_sender: AlertSender | None = None
         for flow_id, (_name, count, _status) in today_volumes.items():
             snapshots.save_snapshot(flow_id, today, count, now)
 
-        _analyze_registered_flows(adapter, llm_adapter, config, monitored_flows, now)
+        # When the caller passes an explicit sender (console/chat watcher), route registered-Flow
+        # reports there too — their channel_id is "cli", not a real Slack channel. The scheduler
+        # passes no sender, so each report keeps going to the Slack channel it was registered in.
+        _analyze_registered_flows(
+            adapter, llm_adapter, config, monitored_flows, now,
+            channel_sender_override=alert_sender,
+        )
 
         # Housekeeping: drop state past its retention horizon so the SQLite file stays small.
         suppression.purge_expired(now)

@@ -31,6 +31,28 @@ Response rules:
 """
 
 
+NEXLA_COMMAND_ROUTER_PROMPT = """You route an operator's request to one tool for a read-only Nexla pipeline-monitoring agent.
+- Pick exactly one tool when the request maps to one; do not chain tools.
+- If the request is a greeting, is unclear, or asks what you can do, answer briefly in one or two sentences instead of calling a tool.
+- Never invent a flow ID; only pass an ID the operator actually gave.
+- You cannot pause, activate, or otherwise change flows — those require human confirmation and are not available to you.
+"""
+
+
+def _route_response_to_dict(message: Any) -> dict[str, Any]:
+    """Map a chat-completion message to {"tool", "arguments"} or {"text"}."""
+    tool_calls = getattr(message, "tool_calls", None)
+    if tool_calls:
+        call = tool_calls[0]
+        try:
+            arguments = json.loads(call.function.arguments or "{}")
+        except (TypeError, ValueError):
+            arguments = {}
+        return {"tool": call.function.name, "arguments": arguments if isinstance(arguments, dict) else {}}
+    content = (getattr(message, "content", None) or "").strip()
+    return {"text": content}
+
+
 class OpencodeAdapter:
     """Adapter for opencode.ai Zen anomaly classification calls."""
 
@@ -64,3 +86,16 @@ class OpencodeAdapter:
         if not isinstance(parsed, dict):
             raise ValueError("opencode.ai Zen response JSON was not an object")
         return parsed
+
+    def route_command(self, message: str, tools: list[dict[str, Any]]) -> dict[str, Any]:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": NEXLA_COMMAND_ROUTER_PROMPT},
+                {"role": "user", "content": message},
+            ],
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=300,
+        )
+        return _route_response_to_dict(response.choices[0].message)

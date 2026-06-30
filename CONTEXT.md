@@ -61,3 +61,13 @@ _Avoid_: notifier, transport plugin
 **Blocklist**:
 A list of flows that the agent should never alert on. Used for flows that are naturally noisy and would create too many false alerts.
 _Avoid_: exclusion list, ignore list, allowlist
+
+### Command routing
+
+**Command Router**:
+The step that takes an operator's plain-language message and decides which single behavior to run (scan a flow, scan the org, list a flow's latest runs, manage monitoring). The LLM chooses via tool-calling; if it is unavailable or its choice is unusable, routing falls back to the deterministic intent parser. See ADR-0008.
+_Avoid_: dispatcher, intent classifier, NLU
+
+**Tool Catalog**:
+The fixed set of read-only / supervised-safe behaviors the Command Router may invoke, each described to the LLM with a JSON schema. Pause and activate are deliberately excluded — they stay behind human confirmation.
+_Avoid_: command list, actions, capabilities

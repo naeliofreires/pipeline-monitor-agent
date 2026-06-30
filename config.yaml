@@ -8,6 +8,9 @@ monitoring:
   notification_lookback_hours: 24
   suppression_window_hours: 2
   state_db_path: "data/state.db"
+  # In --chat, a background watcher polls every poll_interval_seconds and prints new anomalies
+  # above the prompt (so the session surfaces problems without being asked). Set false to disable.
+  chat_watch_enabled: true
 
 # Silent Failure detection: a flow whose latest run moved far fewer records than the
 # previously observed run, while still looking healthy. Compared run-over-run from Nexla
@@ -48,6 +51,12 @@ controls:
   interactions_port: 8080
   interactions_path: "/slack/interactions"
   commands_path: "/slack/commands"
+
+# Plain-language command routing (terminal --ask/--chat, and Slack later). When enabled, the LLM
+# decides which behavior to run; if it is unavailable or its choice is unusable, routing falls back
+# to the deterministic intent parser. Set to false to force deterministic-only routing. See ADR-0008.
+router:
+  enabled: true
 
 llm:
   provider: "openai"

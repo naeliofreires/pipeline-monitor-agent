@@ -12,7 +12,7 @@ from modules.controls.policy import ControlMetadata
 logger = logging.getLogger(__name__)
 
 
-HELP_TEXT = "Commands: `help`, `scan`, `scan FLOW_ID`, `monitoring FLOW_ID`, `monitoring remove FLOW_ID`, `monitoring list`"
+HELP_TEXT = "Commands: `help`, `scan`, `scan FLOW_ID`, `scan flow FLOW_ID`, `monitoring FLOW_ID`, `monitoring remove FLOW_ID`, `monitoring list`"
 
 
 class SlackCommandExecutor:
@@ -39,8 +39,11 @@ class SlackCommandExecutor:
             return HELP_TEXT
         if command == "scan":
             args = text.split()[1:]
+            # Accept the natural phrasing `scan flow FLOW_ID` as well as `scan FLOW_ID`.
+            if len(args) == 2 and args[0].lower() == "flow":
+                args = args[1:]
             if len(args) > 1:
-                return "Usage: `/pipeline scan` or `/pipeline scan FLOW_ID`."
+                return "Usage: `/pipeline scan`, `/pipeline scan FLOW_ID`, or `/pipeline scan flow FLOW_ID`."
             if args:
                 try:
                     flow_id = int(args[0])

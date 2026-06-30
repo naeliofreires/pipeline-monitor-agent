@@ -4,7 +4,11 @@ import json
 import os
 from typing import Any
 
-from adapters.opencode_adapter import NEXLA_ANOMALY_ANALYSIS_PROMPT
+from adapters.opencode_adapter import (
+    NEXLA_ANOMALY_ANALYSIS_PROMPT,
+    NEXLA_COMMAND_ROUTER_PROMPT,
+    _route_response_to_dict,
+)
 
 
 class OpenAIAdapter:
@@ -44,3 +48,16 @@ class OpenAIAdapter:
         if not isinstance(parsed, dict):
             raise ValueError("OpenAI response JSON was not an object")
         return parsed
+
+    def route_command(self, message: str, tools: list[dict[str, Any]]) -> dict[str, Any]:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": NEXLA_COMMAND_ROUTER_PROMPT},
+                {"role": "user", "content": message},
+            ],
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=300,
+        )
+        return _route_response_to_dict(response.choices[0].message)

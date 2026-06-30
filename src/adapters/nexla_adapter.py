@@ -13,7 +13,9 @@ logger = logging.getLogger(__name__)
 
 
 def _log_sdk_response(operation: str, flow_id: int, response: Any) -> None:
-    logger.info("Nexla SDK %s response for flow %s: %s", operation, flow_id, response)
+    # Debug-only: the full SDK payload is large; logging it at INFO floods the console on
+    # every scan (flows.get runs each tick). Raise the log level to DEBUG to see it.
+    logger.debug("Nexla SDK %s response for flow %s: %s", operation, flow_id, response)
 
 
 def _plain(value: Any) -> Any:
@@ -102,6 +104,35 @@ def _run_summary_rows(value: Any) -> list[dict[str, Any]] | None:
     if not rows:
         return None
     return [row for row in rows if isinstance(row, dict)]
+
+
+def _run_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pick(row: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if row.get(key) is not None:
+            return row[key]
+    return None
+
+
+def _normalize_run_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Shape one run-summary row into a stable {run_id, records, errors, size, last_written, status}."""
+    status = _pick(row, "status", "runStatus", "run_status", "state")
+    return {
+        "run_id": _run_int(_pick(row, "runId", "run_id", "runid", "id")),
+        "records": _run_int(_pick(row, "records", "recordCount", "record_count", "latestRecordCount")),
+        "errors": _run_int(_pick(row, "errors", "errorCount", "error_count", "latestErrorCount")),
+        "size": _run_int(_pick(row, "size")),
+        "last_written": _run_int(_pick(row, "lastWritten", "last_written", "endTime", "end_time")),
+        "status": str(status).strip().upper() if status is not None else None,
+    }
 
 
 class NexlaAdapter:
@@ -319,6 +350,31 @@ class NexlaAdapter:
             except Exception as exc:
                 logger.debug("Failed to get run summary via get_resource_metrics_by_run for %s/%s: %s", metrics_resource_type, resource_id, exc)
         return None
+
+    def get_flow_runs(
+        self,
+        flow_id: int,
+        resource_type: str | None = None,
+        resource_id: int | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]] | None:
+        """Latest runs for a Flow's primary resource, most recent first.
+
+        Reuses the run-summary read (metrics grouped by runId) and normalizes each row to a stable
+        shape. Read-only; returns ``None`` when no runs are available or the read fails.
+        """
+        rows = self.get_run_summary(flow_id, resource_type, resource_id, None)
+        if isinstance(rows, dict):
+            rows = _run_summary_rows(rows)
+        if not rows:
+            return None
+        normalized = [_normalize_run_row(row) for row in rows if isinstance(row, dict)]
+        normalized = [row for row in normalized if row["run_id"] is not None]
+        if not normalized:
+            return None
+        normalized.sort(key=lambda row: (row["last_written"] or 0, row["run_id"] or 0), reverse=True)
+        capped = max(1, int(limit)) if limit else 10
+        return normalized[:capped]
 
     def list_unhealthy_flows(self, health_status: str = "RED") -> list[dict[str, Any]]:
         """Org-health rows for flows in the requested health state (default RED).

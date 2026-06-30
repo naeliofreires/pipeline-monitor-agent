@@ -446,10 +446,10 @@ def _build_run_report_text(
     lines = [
         f"*New run processed for Flow {flow_label}*",
         "",
-        f"Latest run: {run_id}",
-        f"Records: {_fmt_number(records)}",
-        f"Errors: {_fmt_number(errors)}",
-        f"Status: {status or 'unknown'}",
+        f"*Latest run:* {run_id}",
+        f"*Records:* {_fmt_number(records)}",
+        f"*Errors:* {_fmt_number(errors)}",
+        f"*Status:* {status or 'unknown'}",
     ]
     if previous_runs:
         previous_run = previous_runs[0]
@@ -458,26 +458,26 @@ def _build_run_report_text(
         previous_delta_pct = _pct_delta(records, previous_records)
         lines.extend([
             "",
-            f"Previous run: {previous_run.run_id}",
-            f"Previous records: {_fmt_number(previous_records)}",
-            f"Change from previous run: {_fmt_signed_number(previous_delta)} records "
+            f"*Previous run:* {previous_run.run_id}",
+            f"*Previous records:* {_fmt_number(previous_records)}",
+            f"*Change from previous run:* {_fmt_signed_number(previous_delta)} records "
             f"({_fmt_delta(previous_delta_pct)})",
         ])
     lines.extend([
         "",
-        f"Baseline: average of the previous 5 runs ({len(previous_runs)} available and used)",
-        f"Average records: {_fmt_number(avg_records)}",
-        f"Difference: {_fmt_delta(records_delta_pct)}",
+        f"*Baseline:* average of the previous 5 runs ({len(previous_runs)} available and used)",
+        f"*Average records:* {_fmt_number(avg_records)}",
+        f"*Difference:* {_fmt_delta(records_delta_pct)}",
     ])
     if classification is not None and classification.risk_classification == "high":
         lines.extend([
             "",
-            "Risk Classification: HIGH",
-            f"Explanation: {wrap_explanation(classification.explanation)}",
-            f"Recommended Action: {wrap_explanation(classification.recommended_action)}",
+            "*Risk Classification:* HIGH",
+            f"*Explanation:* {wrap_explanation(classification.explanation)}",
+            f"*Recommended Action:* {wrap_explanation(classification.recommended_action)}",
         ])
     else:
-        lines.extend(["", "Result: No high-risk Anomaly found from supported signals."])
+        lines.extend(["", "*Result:* No high-risk Anomaly found from supported signals."])
     return "\n".join(lines)
 
 

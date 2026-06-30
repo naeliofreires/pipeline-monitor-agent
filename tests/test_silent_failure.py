@@ -550,12 +550,12 @@ class RegisteredFlowMonitoringTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         text = sent[0][0]
         self.assertIn("New run processed", text)
-        self.assertIn("Previous run: r5", text)
-        self.assertIn("Previous records: 500", text)
-        self.assertIn("Change from previous run: +100 records (+20.0%)", text)
+        self.assertIn("*Previous run:* r5", text)
+        self.assertIn("*Previous records:* 500", text)
+        self.assertIn("*Change from previous run:* +100 records (+20.0%)", text)
         self.assertIn("previous 5 runs (5 available and used)", text)
-        self.assertIn("Average records: 300.0", text)
-        self.assertIn("Difference: +100.0%", text)
+        self.assertIn("*Average records:* 300.0", text)
+        self.assertIn("*Difference:* +100.0%", text)
         self.assertEqual(monitored.list_flows("C1")[0].last_seen_run_id, "r6")
 
     def test_registered_flow_high_risk_run_includes_classification(self):
@@ -610,8 +610,8 @@ class RegisteredFlowMonitoringTests(unittest.TestCase):
 
         self.assertEqual(classify_calls[0][0:2], (42, "silent_failure"))
         self.assertIn("previous 5-run average", classify_calls[0][2])
-        self.assertIn("Change from previous run: -990 records (-99.0%)", sent[0])
-        self.assertIn("Risk Classification: HIGH", sent[0])
+        self.assertIn("*Change from previous run:* -990 records (-99.0%)", sent[0])
+        self.assertIn("*Risk Classification:* HIGH", sent[0])
         flow = monitored.list_flows("C1")[0]
         self.assertEqual((flow.last_seen_run_id, flow.last_alerted_run_id), ("r6", "r6"))
 
